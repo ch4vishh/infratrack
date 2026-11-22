@@ -7,6 +7,7 @@ import {
   Clock,
   ExternalLink,
   Flame,
+  ImageOff,
   Maximize2,
   ShieldCheck,
   ZoomIn,
@@ -21,8 +22,17 @@ import { ImageLightbox } from "@/components/ImageLightbox";
 import { supabase } from "@/integrations/supabase/client";
 import { useLanguage } from "@/lib/i18n";
 import { getUpvotesCount } from "@/lib/upvotes";
-import { getComplaintPhoto } from "@/lib/imageCompression";
-import type { Complaint } from "@/lib/complaints";
+import {
+  getComplaintPhoto,
+  getComplaintBeforePhoto,
+  resolveBeforePhotoUrl,
+  resolveAfterPhotoUrl,
+} from "@/lib/imageCompression";
+import {
+  getLocalComplaintById,
+  DEFAULT_DEPARTMENTS,
+  type Complaint,
+} from "@/lib/complaints";
 import { categoryLabel, formatDateTime } from "@/lib/infratrack";
 
 export const Route = createFileRoute("/complaints/$id")({
@@ -62,25 +72,61 @@ function Details() {
     title: string;
     badge: string;
   } | null>(null);
+  const [beforeImgError, setBeforeImgError] = useState(false);
+  const [afterImgError, setAfterImgError] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["complaint", id],
     queryFn: async () => {
-      const [{ data: complaint, error }, { data: history }, { data: departments }] =
-        await Promise.all([
-          supabase.from("complaints").select("*").eq("id", id).maybeSingle(),
-          supabase
-            .from("status_history")
-            .select("*")
-            .eq("complaint_id", id)
-            .order("changed_at", { ascending: true }),
-          supabase.from("departments").select("id, name"),
-        ]);
-      if (error) throw error;
+      let complaint: Complaint | null = null;
+      let history: HistoryRow[] = [];
+      let departments: { id: string; name: string }[] = [];
+
+      try {
+        const [{ data: cData, error }, { data: hData }, { data: dData }] =
+          await Promise.all([
+            supabase.from("complaints").select("*").eq("id", id).maybeSingle(),
+            supabase
+              .from("status_history")
+              .select("*")
+              .eq("complaint_id", id)
+              .order("changed_at", { ascending: true }),
+            supabase.from("departments").select("id, name"),
+          ]);
+        if (!error && cData) {
+          complaint = cData as Complaint;
+        }
+        if (hData) history = hData as HistoryRow[];
+        if (dData && dData.length > 0) departments = dData;
+      } catch (err) {
+        console.warn("Supabase fetch for complaint failed, checking local store:", err);
+      }
+
+      if (!complaint) {
+        complaint = getLocalComplaintById(id);
+      }
+
+      if (!departments || departments.length === 0) {
+        departments = DEFAULT_DEPARTMENTS;
+      }
+
+      if (history.length === 0 && complaint) {
+        history = [
+          {
+            id: `hist-${complaint.id}`,
+            complaint_id: complaint.id,
+            old_status: null,
+            new_status: (complaint.status as any) || "pending",
+            changed_at: complaint.created_at,
+            remarks: complaint.remarks || "Complaint submitted with location and evidence",
+          },
+        ];
+      }
+
       return {
-        complaint: complaint as Complaint | null,
-        history: (history ?? []) as HistoryRow[],
-        departments: departments ?? [],
+        complaint,
+        history,
+        departments,
       };
     },
   });
@@ -93,9 +139,9 @@ function Details() {
   const department = data.departments.find((d) => d.id === c.department_id)?.name ?? "Unassigned";
   const upvotes = getUpvotesCount(c.id, c.complaint_id);
 
-  // Photos
-  const beforePhoto = getComplaintPhoto(c.id, "before", c.image_url);
-  const afterPhoto = getComplaintPhoto(c.id, "after");
+  // Unified Photo Resolution
+  const beforePhoto = getComplaintBeforePhoto(c);
+  const afterPhoto = resolveAfterPhotoUrl(c);
 
   return (
     <div className="grid gap-6 lg:grid-cols-3 max-w-[1400px] mx-auto">
@@ -162,14 +208,14 @@ function Details() {
                   <span className="h-2 w-2 rounded-full bg-warning" />
                   {t("before_photo_label")}
                 </span>
-                {beforePhoto ? (
+                {beforePhoto && !beforeImgError ? (
                   <span className="text-[11px] text-primary font-medium flex items-center gap-1">
                     <ZoomIn className="h-3 w-3" /> Inspect
                   </span>
                 ) : null}
               </div>
 
-              {beforePhoto ? (
+              {beforePhoto && !beforeImgError ? (
                 <div
                   onClick={() =>
                     setLightboxImg({
@@ -183,6 +229,7 @@ function Details() {
                   <img
                     src={beforePhoto}
                     alt="Before Repair Evidence"
+                    onError={() => setBeforeImgError(true)}
                     className="h-56 w-full object-cover transition-transform duration-300 group-hover:scale-105"
                   />
                   <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
@@ -191,10 +238,18 @@ function Details() {
                     </span>
                   </div>
                 </div>
+              ) : beforeImgError ? (
+                <div className="h-56 rounded-xl border border-dashed border-destructive/30 bg-destructive/5 flex flex-col items-center justify-center text-center p-4">
+                  <ImageOff className="h-8 w-8 text-destructive/70 mb-1" />
+                  <p className="text-xs font-semibold text-destructive">{t("photo_load_failed")}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    {t("photo_load_failed_hint")}
+                  </p>
+                </div>
               ) : (
                 <div className="h-56 rounded-xl border border-dashed border-border flex flex-col items-center justify-center text-center p-4 bg-background/50">
                   <Camera className="h-8 w-8 text-muted-foreground/60 mb-1" />
-                  <p className="text-xs font-semibold text-foreground">No Before Photo Attached</p>
+                  <p className="text-xs font-semibold text-foreground">{t("no_before_photo")}</p>
                   <p className="text-[11px] text-muted-foreground">Reported via text & GPS pin</p>
                 </div>
               )}
@@ -207,14 +262,14 @@ function Details() {
                   <span className="h-2 w-2 rounded-full bg-success" />
                   {t("after_photo_label")}
                 </span>
-                {afterPhoto ? (
+                {afterPhoto && !afterImgError ? (
                   <span className="text-[11px] text-success font-medium flex items-center gap-1">
                     <ZoomIn className="h-3 w-3" /> Inspect
                   </span>
                 ) : null}
               </div>
 
-              {afterPhoto ? (
+              {afterPhoto && !afterImgError ? (
                 <div
                   onClick={() =>
                     setLightboxImg({
@@ -228,6 +283,7 @@ function Details() {
                   <img
                     src={afterPhoto}
                     alt="After Resolution Proof"
+                    onError={() => setAfterImgError(true)}
                     className="h-56 w-full object-cover transition-transform duration-300 group-hover:scale-105"
                   />
                   <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
@@ -235,6 +291,14 @@ function Details() {
                       <Maximize2 className="h-3.5 w-3.5" /> Full Size
                     </span>
                   </div>
+                </div>
+              ) : afterImgError ? (
+                <div className="h-56 rounded-xl border border-dashed border-destructive/30 bg-destructive/5 flex flex-col items-center justify-center text-center p-4">
+                  <ImageOff className="h-8 w-8 text-destructive/70 mb-1" />
+                  <p className="text-xs font-semibold text-destructive">{t("photo_load_failed")}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    {t("photo_load_failed_hint")}
+                  </p>
                 </div>
               ) : (
                 <div className="h-56 rounded-xl border border-dashed border-border flex flex-col items-center justify-center text-center p-4 bg-background/50">

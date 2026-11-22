@@ -266,6 +266,69 @@ export const translations: Translations = {
   },
   click_to_enlarge: { en: "Click to inspect full photo", hi: "बड़ा करके देखने के लिए क्लिक करें" },
   close_lightbox: { en: "Close Preview", hi: "पूर्वावलोकन बंद करें" },
+  photo_load_failed: {
+    en: "Photo could not be loaded",
+    hi: "फ़ोटो लोड नहीं हो सकी",
+  },
+  photo_load_failed_hint: {
+    en: "The image resource is unreachable or unavailable.",
+    hi: "छवि संसाधन अनुपलब्ध है या लोड नहीं हो सका।",
+  },
+  no_before_photo: {
+    en: "No Before Photo Attached",
+    hi: "कोई पूर्व फ़ोटो संलग्न नहीं है",
+  },
+  reported_evidence_label: {
+    en: "Citizen Reported Issue Photo",
+    hi: "नागरिक द्वारा प्रस्तुत समस्या फ़ोटो",
+  },
+  view_details: {
+    en: "View Details",
+    hi: "विवरण देखें",
+  },
+
+  // Report Issue Form
+  report_title_label: { en: "Title", hi: "शीर्षक" },
+  report_title_placeholder: {
+    en: "e.g. Broken streetlight causing dark intersection",
+    hi: "उदा. टूटी स्ट्रीटलाइट जिससे चौराहे पर अंधेरा है",
+  },
+  report_desc_label: { en: "Description", hi: "विवरण" },
+  report_desc_placeholder: {
+    en: "What is wrong, how big is it, is anyone at risk?",
+    hi: "क्या समस्या है, कितनी गंभीर है, क्या किसी को खतरा है?",
+  },
+  report_category_label: { en: "Category", hi: "श्रेणी" },
+  report_priority_label: { en: "Priority", hi: "प्राथमिकता" },
+  report_suggested: { en: "Suggested", hi: "सुझाया गया" },
+  report_autodispatch: { en: "Auto-dispatches to", hi: "स्वचालित प्रेषण विभाग" },
+  report_address_label: { en: "Address / Landmark", hi: "पता / लैंडमार्क" },
+  report_address_placeholder: {
+    en: "e.g. 100 Feet Road, near Metro Pillar 42",
+    hi: "उदा. मुख्य सड़क, मेट्रो पिलर 42 के पास",
+  },
+  report_area_label: { en: "Area / Ward (optional)", hi: "क्षेत्र / वार्ड (वैकल्पिक)" },
+  report_area_placeholder: {
+    en: "e.g. Ward 12 - Indiranagar",
+    hi: "उदा. वार्ड 12 - इन्दिरा नगर",
+  },
+  report_photo_url_label: { en: "Photo URL (alternative)", hi: "फ़ोटो URL (वैकल्पिक)" },
+  report_submit_btn: { en: "Submit Complaint", hi: "शिकायत दर्ज करें" },
+  report_submitting_btn: { en: "Submitting…", hi: "दर्ज की जा रही है…" },
+  report_map_hint: {
+    en: "Tap the map to mark the exact spot.",
+    hi: "सटीक स्थान चिह्नित करने के लिए मानचित्र पर टैप करें।",
+  },
+  report_use_location: { en: "Use my location", hi: "मेरा वर्तमान स्थान चुनें" },
+  report_upload_click: {
+    en: "Click to upload photo evidence",
+    hi: "फ़ोटो साक्ष्य अपलोड करने के लिए क्लिक करें",
+  },
+  report_upload_types: {
+    en: "JPEG, PNG, WebP (auto-compressed)",
+    hi: "JPEG, PNG, WebP (स्वतः संपीड़ित)",
+  },
+  report_change_photo: { en: "Change Photo", hi: "फ़ोटो बदलें" },
 };
 
 type LanguageContextType = {

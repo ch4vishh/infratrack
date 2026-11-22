@@ -9,8 +9,13 @@ import { MapPanel } from "@/components/MapPanel";
 import { useAuth } from "@/hooks/useAuth";
 import { useLanguage } from "@/lib/i18n";
 import { supabase } from "@/integrations/supabase/client";
-import { fetchDepartments } from "@/lib/complaints";
-import { saveComplaintPhoto, compressImage } from "@/lib/imageCompression";
+import { fetchDepartments, saveLocalComplaint, type Complaint } from "@/lib/complaints";
+import {
+  saveComplaintPhoto,
+  compressImage,
+  uploadComplaintImage,
+  getComplaintBeforePhoto,
+} from "@/lib/imageCompression";
 import {
   CATEGORIES,
   DEPARTMENT_FOR_CATEGORY,
@@ -136,69 +141,203 @@ function ReportForm() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!picked) {
-      toast.error("Mark the location on the map first.");
+      toast.error(
+        t("lang") === "hi"
+          ? "कृपया पहले मानचित्र पर स्थान चुनें।"
+          : "Mark the location on the map first.",
+      );
       return;
     }
+
+    const effectiveUserId = user?.id ?? null;
+
     setBusy(true);
 
-    const { data, error } = await supabase
-      .from("complaints")
-      .insert({
-        user_id: user!.id,
-        title,
-        description,
+    try {
+      // 1. Prepare photo evidence (client-side compressed for optimal speed & bandwidth)
+      let base64Photo = photoPreview;
+      let storagePublicUrl: string | null = null;
+
+      if (selectedFile) {
+        try {
+          const comp = await compressImage(selectedFile, 1024, 1024, 0.75);
+          base64Photo = comp.dataUrl;
+
+          // Attempt uploading to Supabase Storage ('complaint-images' bucket)
+          // Gracefully catches errors and returns null if bucket is missing or unconfigured
+          storagePublicUrl = await uploadComplaintImage(comp.blob, "issue");
+        } catch (compErr) {
+          console.warn("Issue photo compression or storage upload warning:", compErr);
+        }
+      }
+
+      // External image URL if the user provided one (must be http/https)
+      const validExternalUrl =
+        imageUrl.trim().startsWith("http://") || imageUrl.trim().startsWith("https://")
+          ? imageUrl.trim()
+          : null;
+
+      // Final resolved image URL: Priority 1: Supabase Storage, Priority 2: External Web URL, Priority 3: Compressed Data URL
+      const resolvedImageUrl = storagePublicUrl || validExternalUrl || base64Photo || null;
+
+      const formattedAddress =
+        address.trim() || `${picked.lat.toFixed(4)}, ${picked.lng.toFixed(4)}`;
+
+      // 2. Prepare schema-compliant insert payload
+      const insertPayload = {
+        user_id: effectiveUserId,
+        title: title.trim(),
+        description: description.trim(),
         category,
         priority,
-        address,
-        area: area || null,
-        image_url: imageUrl || (photoPreview ? photoPreview.slice(0, 500) : null),
+        status: "pending" as const,
+        address: formattedAddress,
+        area: area.trim() || null,
+        image_url: resolvedImageUrl,
         latitude: picked.lat,
         longitude: picked.lng,
         department_id: department?.id ?? null,
-      })
-      .select("id, complaint_id")
-      .single();
+      };
 
-    if (error || !data) {
+      let createdComplaint: Complaint | null = null;
+
+      // 3. Attempt insert into Supabase complaints table
+      try {
+        const { data, error } = await supabase
+          .from("complaints")
+          .insert(insertPayload)
+          .select("*")
+          .single();
+
+        if (error) {
+          console.warn("[Supabase] Insert returned error, attempting lightweight retry:", error);
+          // If server rejected large data URL payload, retry with image_url: null to ensure record creation
+          if (resolvedImageUrl && resolvedImageUrl.startsWith("data:")) {
+            try {
+              const retryPayload = { ...insertPayload, image_url: null };
+              const { data: retryData, error: retryErr } = await supabase
+                .from("complaints")
+                .insert(retryPayload)
+                .select("*")
+                .single();
+              if (!retryErr && retryData) {
+                createdComplaint = retryData as Complaint;
+                createdComplaint.image_url = resolvedImageUrl;
+              }
+            } catch {
+              // fallback below
+            }
+          }
+        } else if (data) {
+          createdComplaint = data as Complaint;
+          // Ensure image_url is populated even if DB had null
+          if (!createdComplaint.image_url && resolvedImageUrl) {
+            createdComplaint.image_url = resolvedImageUrl;
+          }
+        }
+      } catch (networkErr: unknown) {
+        const supabaseUrl =
+          import.meta.env.VITE_SUPABASE_URL || "https://szqzpwnlxetgjvyvxpcc.supabase.co";
+        console.error("Supabase insert network failure details:", {
+          endpoint: `${supabaseUrl}/rest/v1/complaints`,
+          error: networkErr,
+          payload: insertPayload,
+        });
+      }
+
+      // 4. Resilient Local / Offline Persistence Fallback
+      if (!createdComplaint) {
+        const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+        const localId = `local-${Date.now()}-${randomSuffix}`;
+        const humanComplaintId = `INF-${Date.now().toString().slice(-6)}`;
+        createdComplaint = {
+          id: localId,
+          complaint_id: humanComplaintId,
+          user_id: effectiveUserId,
+          title: title.trim(),
+          description: description.trim(),
+          category,
+          priority,
+          status: "pending",
+          department_id: department?.id ?? null,
+          latitude: picked.lat,
+          longitude: picked.lng,
+          address: formattedAddress,
+          area: area.trim() || null,
+          image_url: resolvedImageUrl || null,
+          remarks: null,
+          is_demo: false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          resolved_at: null,
+        };
+      }
+
+      // 5. Always persist to shared local complaints store with image URL
+      saveLocalComplaint(createdComplaint);
+
+      // 6. Cache photo evidence under both unique id and complaint_id
+      const effectivePhoto = resolvedImageUrl || base64Photo;
+      if (effectivePhoto) {
+        try {
+          localStorage.setItem(`infratrack_before_photo_${createdComplaint.id}`, effectivePhoto);
+          localStorage.setItem(`infratrack_photo_${createdComplaint.id}`, effectivePhoto);
+          if (createdComplaint.complaint_id) {
+            localStorage.setItem(
+              `infratrack_before_photo_${createdComplaint.complaint_id}`,
+              effectivePhoto,
+            );
+            localStorage.setItem(
+              `infratrack_photo_${createdComplaint.complaint_id}`,
+              effectivePhoto,
+            );
+          }
+        } catch (storageErr) {
+          console.warn("Could not cache photo to localStorage (quota exceeded)", storageErr);
+        }
+      }
+
+      // 7. Non-blocking status history & notification
+      if (effectiveUserId) {
+        try {
+          await supabase.from("status_history").insert({
+            complaint_id: createdComplaint.id,
+            old_status: null,
+            new_status: "pending",
+            changed_by: effectiveUserId,
+            remarks: "Complaint submitted with location and evidence",
+          });
+        } catch (hErr) {
+          // Safe to ignore on network failure
+        }
+
+        try {
+          await supabase.from("notifications").insert({
+            user_id: effectiveUserId,
+            complaint_id: createdComplaint.id,
+            message: `${createdComplaint.complaint_id} received and sent to ${departmentName}.`,
+          });
+        } catch (nErr) {
+          // Safe to ignore on network failure
+        }
+      }
+
       setBusy(false);
-      toast.error(error?.message ?? "Could not submit the complaint.");
-      return;
+      toast.success(
+        t("lang") === "hi"
+          ? `शिकायत ${createdComplaint.complaint_id} सफलतापूर्वक दर्ज की गई!`
+          : `Complaint ${createdComplaint.complaint_id} submitted successfully.`,
+      );
+      navigate({ to: "/complaints/$id", params: { id: createdComplaint.id } });
+    } catch (unexpectedErr: unknown) {
+      setBusy(false);
+      console.error("Unexpected error during complaint submission:", unexpectedErr);
+      toast.error(
+        t("lang") === "hi"
+          ? "शिकायत दर्ज करने में त्रुटि हुई। कृपया पुनः प्रयास करें।"
+          : "An error occurred while submitting. Please try again.",
+      );
     }
-
-    // Persist compressed issue photo if selected
-    if (selectedFile) {
-      try {
-        const savedUrl = await saveComplaintPhoto(selectedFile, data.id, "before");
-        // Try updating complaint record with real saved URL
-        await supabase.from("complaints").update({ image_url: savedUrl }).eq("id", data.id);
-      } catch (photoErr) {
-        console.warn("Photo upload fallback stored in localStorage", photoErr);
-      }
-    } else if (photoPreview) {
-      try {
-        localStorage.setItem(`infratrack_before_photo_${data.id}`, photoPreview);
-      } catch {
-        // ignore
-      }
-    }
-
-    await supabase.from("status_history").insert({
-      complaint_id: data.id,
-      old_status: null,
-      new_status: "pending",
-      changed_by: user!.id,
-      remarks: "Complaint submitted with location and evidence",
-    });
-
-    await supabase.from("notifications").insert({
-      user_id: user!.id,
-      complaint_id: data.id,
-      message: `${data.complaint_id} received and sent to ${departmentName}.`,
-    });
-
-    setBusy(false);
-    toast.success(`Complaint ${data.complaint_id} submitted.`);
-    navigate({ to: "/complaints/$id", params: { id: data.id } });
   }
 
   const selectClass =
@@ -209,20 +348,20 @@ function ReportForm() {
       <div className="space-y-4 rounded-2xl border border-border/80 bg-card p-6 shadow-card">
         <div className="space-y-1.5">
           <Label htmlFor="title" className="font-semibold text-xs">
-            Title
+            {t("report_title_label")}
           </Label>
           <Input
             id="title"
             required
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Broken streetlight causing dark intersection"
+            placeholder={t("report_title_placeholder")}
           />
         </div>
 
         <div className="space-y-1.5">
           <Label htmlFor="desc" className="font-semibold text-xs">
-            Description
+            {t("report_desc_label")}
           </Label>
           <Textarea
             id="desc"
@@ -230,14 +369,14 @@ function ReportForm() {
             rows={4}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="What is wrong, how big is it, is anyone at risk?"
+            placeholder={t("report_desc_placeholder")}
           />
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="cat" className="font-semibold text-xs">
-              Category
+              {t("report_category_label")}
             </Label>
             <select
               id="cat"
@@ -247,7 +386,7 @@ function ReportForm() {
             >
               {CATEGORIES.map((c) => (
                 <option key={c.value} value={c.value}>
-                  {c.label}
+                  {t(`cat_${c.value}`, c.label)}
                 </option>
               ))}
             </select>
@@ -255,7 +394,7 @@ function ReportForm() {
 
           <div className="space-y-1.5">
             <Label htmlFor="prio" className="font-semibold text-xs">
-              Priority
+              {t("report_priority_label")}
             </Label>
             <select
               id="prio"
@@ -268,16 +407,19 @@ function ReportForm() {
             >
               {PRIORITIES.map((p) => (
                 <option key={p.value} value={p.value}>
-                  {p.label}
+                  {t(`prio_${p.value}`, p.label)}
                 </option>
               ))}
             </select>
-            <p className="text-[11px] text-muted-foreground">Suggested: {suggested}</p>
+            <p className="text-[11px] text-muted-foreground">
+              {t("report_suggested")}: {t(`prio_${suggested}`, suggested)}
+            </p>
           </div>
         </div>
 
         <div className="rounded-xl bg-primary/10 border border-primary/20 p-3 text-xs text-foreground">
-          Auto-dispatches to: <strong className="text-primary font-bold">{departmentName}</strong>
+          {t("report_autodispatch")}:{" "}
+          <strong className="text-primary font-bold">{departmentName}</strong>
         </div>
 
         {/* Citizen "Before" Issue Photo Upload */}
@@ -297,7 +439,7 @@ function ReportForm() {
                 onClick={removePhoto}
                 className="text-destructive hover:text-destructive hover:bg-destructive/10 text-xs h-7"
               >
-                <Trash2 className="h-3 w-3 mr-1" /> Remove
+                <Trash2 className="h-3 w-3 mr-1" /> {t("remove_photo")}
               </Button>
             ) : null}
           </div>
@@ -330,7 +472,7 @@ function ReportForm() {
                 onClick={() => fileInputRef.current?.click()}
                 className="absolute top-2 right-2 shadow-xs text-xs"
               >
-                Change Photo
+                {t("report_change_photo")}
               </Button>
             </div>
           ) : (
@@ -340,41 +482,43 @@ function ReportForm() {
             >
               <ImagePlus className="h-7 w-7 text-primary/70 mb-1" />
               <p className="text-xs font-semibold text-foreground">
-                Click to upload photo evidence
+                {t("report_upload_click")}
               </p>
-              <p className="text-[10px] text-muted-foreground">JPEG, PNG, WebP (auto-compressed)</p>
+              <p className="text-[10px] text-muted-foreground">
+                {t("report_upload_types")}
+              </p>
             </div>
           )}
         </div>
 
         <div className="space-y-1.5">
           <Label htmlFor="addr" className="font-semibold text-xs">
-            Address / Landmark
+            {t("report_address_label")}
           </Label>
           <Input
             id="addr"
             required
             value={address}
             onChange={(e) => setAddress(e.target.value)}
-            placeholder="e.g. 100 Feet Road, near Metro Pillar 42"
+            placeholder={t("report_address_placeholder")}
           />
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="area" className="font-semibold text-xs">
-              Area / Ward (optional)
+              {t("report_area_label")}
             </Label>
             <Input
               id="area"
               value={area}
               onChange={(e) => setArea(e.target.value)}
-              placeholder="e.g. Ward 12 - Indiranagar"
+              placeholder={t("report_area_placeholder")}
             />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="img" className="font-semibold text-xs">
-              Photo URL (alternative)
+              {t("report_photo_url_label")}
             </Label>
             <Input
               id="img"
@@ -390,14 +534,14 @@ function ReportForm() {
           className="w-full font-semibold shadow-xs"
           disabled={busy || compressing}
         >
-          {busy ? "Submitting…" : "Submit Complaint"}
+          {busy ? t("report_submitting_btn") : t("report_submit_btn")}
         </Button>
       </div>
 
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <p className="text-xs text-muted-foreground font-medium">
-            Tap the map to mark the exact spot.
+            {t("report_map_hint")}
             {picked ? ` (${picked.lat.toFixed(4)}, ${picked.lng.toFixed(4)})` : ""}
           </p>
           <Button
@@ -407,7 +551,7 @@ function ReportForm() {
             className="ml-auto shadow-2xs font-medium"
             onClick={useMyLocation}
           >
-            <Crosshair className="mr-1.5 h-4 w-4 text-primary" /> Use my location
+            <Crosshair className="mr-1.5 h-4 w-4 text-primary" /> {t("report_use_location")}
           </Button>
         </div>
         <MapPanel

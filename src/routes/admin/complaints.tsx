@@ -2,17 +2,42 @@ import { useMemo, useRef, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Camera, CheckCircle2, Flame, ImagePlus, ThumbsUp, Trash2, Upload } from "lucide-react";
+import {
+  Camera,
+  CheckCircle2,
+  Eye,
+  Flame,
+  ImageOff,
+  ImagePlus,
+  Maximize2,
+  ThumbsUp,
+  Trash2,
+  Upload,
+  ZoomIn,
+} from "lucide-react";
 import { RequireAuth } from "@/components/RequireAuth";
 import { AppShell } from "@/components/AppShell";
 import { StatusBadge, PriorityBadge } from "@/components/Badges";
 import { UpvoteButton } from "@/components/UpvoteButton";
+import { ImageLightbox } from "@/components/ImageLightbox";
 import { useAuth } from "@/hooks/useAuth";
 import { useLanguage } from "@/lib/i18n";
 import { supabase } from "@/integrations/supabase/client";
-import { fetchComplaints, fetchDepartments, updateStatus, type Complaint } from "@/lib/complaints";
+import {
+  fetchComplaints,
+  fetchDepartments,
+  updateStatus,
+  updateLocalComplaint,
+  type Complaint,
+} from "@/lib/complaints";
 import { getUpvotesCount } from "@/lib/upvotes";
-import { saveComplaintPhoto, compressImage } from "@/lib/imageCompression";
+import {
+  saveComplaintPhoto,
+  compressImage,
+  getComplaintBeforePhoto,
+  resolveBeforePhotoUrl,
+  resolveAfterPhotoUrl,
+} from "@/lib/imageCompression";
 import {
   CATEGORIES,
   PRIORITIES,
@@ -24,7 +49,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/admin/complaints")({
   head: () => ({
@@ -79,6 +103,12 @@ function ManageComplaints() {
   const [priority, setPriority] = useState("all");
   const [sortBy, setSortBy] = useState<"upvoted" | "newest">("upvoted");
   const [selected, setSelected] = useState<Complaint | null>(null);
+  const [inspectingComplaint, setInspectingComplaint] = useState<Complaint | null>(null);
+  const [lightboxImg, setLightboxImg] = useState<{
+    url: string;
+    title: string;
+    badge: string;
+  } | null>(null);
 
   const rows = useMemo(() => {
     const filtered = data.filter(
@@ -112,10 +142,12 @@ function ManageComplaints() {
       field === "department_id"
         ? { department_id: value }
         : { priority: value as "low" | "medium" | "high" };
-    const { error } = await supabase.from("complaints").update(patch).eq("id", c.id);
-    if (error) {
-      toast.error(error.message);
-      return;
+    updateLocalComplaint(c.id, patch);
+    try {
+      const { error } = await supabase.from("complaints").update(patch).eq("id", c.id);
+      if (error) console.warn("Supabase assign error:", error);
+    } catch (err) {
+      console.warn("Could not sync assign to Supabase:", err);
     }
     refresh();
     toast.success("Complaint updated");
@@ -164,37 +196,33 @@ function ManageComplaints() {
           ))}
         </select>
 
-        {/* Upvotes / Newest Sort Toggle */}
-        <div className="inline-flex rounded-lg border border-border bg-background/80 p-0.5 text-xs font-semibold shadow-2xs">
+        {/* Sort Controls (Most Upvoted vs Newest) */}
+        <div className="flex items-center gap-1 rounded-lg border border-border/80 bg-background p-1 text-xs font-semibold shadow-2xs">
           <button
             type="button"
             onClick={() => setSortBy("upvoted")}
-            className={cn(
-              "px-3 py-1.5 rounded-md transition-all flex items-center gap-1",
-              sortBy === "upvoted"
-                ? "bg-primary text-primary-foreground shadow-2xs"
-                : "text-muted-foreground hover:text-foreground",
-            )}
+            className={`flex items-center gap-1 rounded-md px-2.5 py-1.5 transition-colors cursor-pointer ${sortBy === "upvoted"
+              ? "bg-primary text-primary-foreground shadow-2xs"
+              : "text-muted-foreground hover:text-foreground"
+              }`}
           >
-            <Flame className="h-3 w-3 text-destructive" />
-            {t("sort_upvoted")}
+            <Flame className="h-3.5 w-3.5" />
+            Most Upvoted
           </button>
           <button
             type="button"
             onClick={() => setSortBy("newest")}
-            className={cn(
-              "px-3 py-1.5 rounded-md transition-all flex items-center gap-1",
-              sortBy === "newest"
-                ? "bg-primary text-primary-foreground shadow-2xs"
-                : "text-muted-foreground hover:text-foreground",
-            )}
+            className={`rounded-md px-2.5 py-1.5 transition-colors cursor-pointer ${sortBy === "newest"
+              ? "bg-primary text-primary-foreground shadow-2xs"
+              : "text-muted-foreground hover:text-foreground"
+              }`}
           >
-            {t("sort_newest")}
+            Newest First
           </button>
         </div>
 
-        <span className="ml-auto self-center text-xs font-medium text-muted-foreground">
-          {rows.length} complaint{rows.length === 1 ? "" : "s"}
+        <span className="ml-auto text-xs text-muted-foreground font-medium">
+          {rows.length} issue{rows.length === 1 ? "" : "s"}
         </span>
       </div>
 
@@ -230,22 +258,57 @@ function ManageComplaints() {
             ) : (
               rows.map((c) => {
                 const upvotes = getUpvotesCount(c.id, c.complaint_id);
+                const beforePhoto = getComplaintBeforePhoto(c);
+
                 return (
                   <tr key={c.id} className="hover:bg-muted/40 transition-colors">
                     <td className="px-4 py-3 font-mono text-xs font-bold text-foreground">
                       {c.complaint_id}
                     </td>
                     <td className="px-4 py-3">
-                      <Link
-                        to="/complaints/$id"
-                        params={{ id: c.id }}
-                        className="font-medium text-foreground hover:text-primary transition-colors line-clamp-1"
-                      >
-                        {c.title}
-                      </Link>
-                      <p className="text-xs text-muted-foreground line-clamp-1">
-                        {c.area ?? c.address}
-                      </p>
+                      <div className="flex items-center gap-3">
+                        {/* Evidence Thumbnail */}
+                        {beforePhoto ? (
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setLightboxImg({
+                                url: beforePhoto,
+                                title: `${c.title} — Reported Photo`,
+                                badge: t("before_photo_label"),
+                              });
+                            }}
+                            className="relative h-11 w-11 flex-shrink-0 cursor-pointer overflow-hidden rounded-lg border border-border bg-black/5 hover:border-primary transition-colors"
+                            title={t("click_to_enlarge")}
+                          >
+                            <img
+                              src={beforePhoto}
+                              alt={c.title}
+                              onError={(e) => {
+                                (e.currentTarget.parentElement as HTMLElement).style.display =
+                                  "none";
+                              }}
+                              className="h-full w-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-black/20 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
+                              <ZoomIn className="h-3.5 w-3.5 text-white" />
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div className="min-w-0 flex-1">
+                          <button
+                            type="button"
+                            onClick={() => setInspectingComplaint(c)}
+                            className="text-left font-medium text-foreground hover:text-primary transition-colors line-clamp-1 cursor-pointer block"
+                          >
+                            {c.title}
+                          </button>
+                          <p className="text-xs text-muted-foreground line-clamp-1">
+                            {c.area ?? c.address}
+                          </p>
+                        </div>
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-xs">{categoryLabel(c.category)}</td>
                     <td className="px-4 py-3">
@@ -280,14 +343,25 @@ function ManageComplaints() {
                       {formatDate(c.created_at)}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="shadow-2xs font-semibold text-xs"
-                        onClick={() => setSelected(c)}
-                      >
-                        Update
-                      </Button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-8 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+                          onClick={() => setInspectingComplaint(c)}
+                          title="View full details and photo"
+                        >
+                          <Eye className="h-3.5 w-3.5 mr-1" /> View
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 shadow-2xs font-semibold text-xs"
+                          onClick={() => setSelected(c)}
+                        >
+                          Update
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -297,6 +371,24 @@ function ManageComplaints() {
         </table>
       </div>
 
+      {/* Quick Details Drawer / Modal */}
+      {inspectingComplaint ? (
+        <AdminComplaintDetailModal
+          complaint={inspectingComplaint}
+          departmentName={
+            departments.find((d) => d.id === inspectingComplaint.department_id)?.name ??
+            "Unassigned"
+          }
+          onClose={() => setInspectingComplaint(null)}
+          onUpdateStatus={() => {
+            setSelected(inspectingComplaint);
+            setInspectingComplaint(null);
+          }}
+          onInspectImage={(url, title, badge) => setLightboxImg({ url, title, badge })}
+        />
+      ) : null}
+
+      {/* Update Status Dialog */}
       {selected ? (
         <UpdateDialog
           complaint={selected}
@@ -306,22 +398,241 @@ function ManageComplaints() {
             setSelected(null);
             refresh();
           }}
+          onInspectImage={(url, title, badge) => setLightboxImg({ url, title, badge })}
+        />
+      ) : null}
+
+      {/* Lightbox Modal */}
+      {lightboxImg ? (
+        <ImageLightbox
+          url={lightboxImg.url}
+          title={lightboxImg.title}
+          badge={lightboxImg.badge}
+          onClose={() => setLightboxImg(null)}
         />
       ) : null}
     </div>
   );
 }
 
+/**
+ * Detailed Inspection Modal for Municipal Authorities
+ */
+function AdminComplaintDetailModal({
+  complaint,
+  departmentName,
+  onClose,
+  onUpdateStatus,
+  onInspectImage,
+}: {
+  complaint: Complaint;
+  departmentName: string;
+  onClose: () => void;
+  onUpdateStatus: () => void;
+  onInspectImage: (url: string, title: string, badge: string) => void;
+}) {
+  const { t } = useLanguage();
+  const [beforeImgError, setBeforeImgError] = useState(false);
+  const [afterImgError, setAfterImgError] = useState(false);
+  const upvotes = getUpvotesCount(complaint.id, complaint.complaint_id);
+
+  const beforePhoto = getComplaintBeforePhoto(complaint);
+  const afterPhoto = resolveAfterPhotoUrl(complaint);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs animate-in fade-in overflow-y-auto">
+      <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto space-y-5 rounded-2xl border border-border/80 bg-card p-6 shadow-2xl">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 border-b border-border/60 pb-4">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap mb-1.5">
+              <span className="font-mono text-xs font-bold text-muted-foreground">
+                {complaint.complaint_id}
+              </span>
+              <PriorityBadge priority={complaint.priority} upvotes={upvotes} />
+              <StatusBadge status={complaint.status} />
+            </div>
+            <h3 className="font-display text-xl font-bold text-foreground">{complaint.title}</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {complaint.address} {complaint.area ? `· ${complaint.area}` : ""}
+            </p>
+          </div>
+          <Button variant="ghost" size="sm" onClick={onClose} className="h-8 w-8 p-0">
+            ✕
+          </Button>
+        </div>
+
+        {/* Citizen "Before" Reported Issue Photo */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-primary flex items-center gap-1.5">
+              <Camera className="h-4 w-4" />
+              {t("reported_evidence_label")}
+            </h4>
+            {beforePhoto && !beforeImgError ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() =>
+                  onInspectImage(
+                    beforePhoto,
+                    `${complaint.title} — Reported Photo`,
+                    t("before_photo_label"),
+                  )
+                }
+                className="h-6 text-xs text-primary gap-1"
+              >
+                <ZoomIn className="h-3 w-3" /> {t("click_to_enlarge")}
+              </Button>
+            ) : null}
+          </div>
+
+          {beforePhoto && !beforeImgError ? (
+            <div
+              onClick={() =>
+                onInspectImage(
+                  beforePhoto,
+                  `${complaint.title} — Reported Photo`,
+                  t("before_photo_label"),
+                )
+              }
+              className="group relative cursor-pointer overflow-hidden rounded-xl border border-border bg-black/5 hover:border-primary/50 transition-colors max-h-72 flex items-center justify-center"
+            >
+              <img
+                src={beforePhoto}
+                alt={complaint.title}
+                onError={() => setBeforeImgError(true)}
+                className="max-h-72 w-full object-cover transition-transform duration-300 group-hover:scale-102"
+              />
+              <div className="absolute inset-0 bg-black/25 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                <span className="rounded-md bg-black/75 px-3 py-1.5 text-xs font-bold text-white flex items-center gap-1.5 shadow-md">
+                  <Maximize2 className="h-3.5 w-3.5" /> {t("click_to_enlarge")}
+                </span>
+              </div>
+            </div>
+          ) : beforeImgError ? (
+            <div className="rounded-xl border border-dashed border-destructive/40 bg-destructive/5 p-4 text-center">
+              <ImageOff className="h-6 w-6 text-destructive mx-auto mb-1" />
+              <p className="text-xs font-semibold text-destructive">{t("photo_load_failed")}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                {t("photo_load_failed_hint")}
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4 text-center">
+              <Camera className="h-6 w-6 text-muted-foreground/60 mx-auto mb-1" />
+              <p className="text-xs font-semibold text-foreground">{t("no_before_photo")}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Citizen submitted this report with GPS pin and description.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Authority "After" Resolution Photo if present */}
+        {afterPhoto ? (
+          <div className="space-y-2 border-t border-border/60 pt-3">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-success flex items-center gap-1.5">
+              <CheckCircle2 className="h-4 w-4" />
+              {t("after_photo_label")}
+            </h4>
+            {!afterImgError ? (
+              <div
+                onClick={() =>
+                  onInspectImage(
+                    afterPhoto,
+                    `${complaint.title} — Resolution Proof`,
+                    t("after_photo_label"),
+                  )
+                }
+                className="group relative cursor-pointer overflow-hidden rounded-xl border border-success/40 bg-black/5 hover:border-success transition-colors max-h-60 flex items-center justify-center"
+              >
+                <img
+                  src={afterPhoto}
+                  alt="Resolution Proof"
+                  onError={() => setAfterImgError(true)}
+                  className="max-h-60 w-full object-cover transition-transform duration-300 group-hover:scale-102"
+                />
+                <div className="absolute inset-0 bg-black/25 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                  <span className="rounded-md bg-black/75 px-3 py-1.5 text-xs font-bold text-white flex items-center gap-1.5 shadow-md">
+                    <Maximize2 className="h-3.5 w-3.5" /> {t("click_to_enlarge")}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Complaint Info Fields */}
+        <div className="space-y-2 border-t border-border/60 pt-3 text-xs">
+          <p className="font-semibold text-foreground">Description:</p>
+          <p className="text-muted-foreground leading-relaxed bg-muted/30 p-3 rounded-lg">
+            {complaint.description || "No description provided."}
+          </p>
+
+          <div className="grid grid-cols-2 gap-2 pt-2">
+            <div>
+              <span className="text-muted-foreground">Department: </span>
+              <strong className="text-foreground">{departmentName}</strong>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Category: </span>
+              <strong className="text-foreground">{categoryLabel(complaint.category)}</strong>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Reported: </span>
+              <strong className="text-foreground">{formatDate(complaint.created_at)}</strong>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Confirmations: </span>
+              <strong className="text-foreground">{upvotes} citizen confirmations</strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer Actions */}
+        <div className="flex items-center justify-between border-t border-border/60 pt-4">
+          <Link
+            to="/complaints/$id"
+            params={{ id: complaint.id }}
+            className="text-xs text-primary font-semibold hover:underline"
+          >
+            Open Public Ticket View →
+          </Link>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={onClose}>
+              Close
+            </Button>
+            <Button
+              size="sm"
+              className="bg-primary text-primary-foreground font-semibold shadow-xs"
+              onClick={onUpdateStatus}
+            >
+              Update Status / Resolve
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Status Update Dialog with Contextual Citizen Photo Preview
+ */
 function UpdateDialog({
   complaint,
   actorId,
   onClose,
   onDone,
+  onInspectImage,
 }: {
   complaint: Complaint;
   actorId: string;
   onClose: () => void;
   onDone: () => void;
+  onInspectImage?: (url: string, title: string, badge: string) => void;
 }) {
   const { t } = useLanguage();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -331,6 +642,9 @@ function UpdateDialog({
   const [proofFile, setProofFile] = useState<File | null>(null);
   const [proofPreview, setProofPreview] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [beforeImgError, setBeforeImgError] = useState(false);
+
+  const beforePhoto = getComplaintBeforePhoto(complaint);
 
   const handleProofChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -375,10 +689,10 @@ function UpdateDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs animate-in fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs animate-in fade-in overflow-y-auto">
       <form
         onSubmit={submit}
-        className="w-full max-w-lg space-y-4 rounded-2xl border border-border/80 bg-card p-6 shadow-2xl"
+        className="w-full max-w-lg space-y-4 rounded-2xl border border-border/80 bg-card p-6 shadow-2xl max-h-[92vh] overflow-y-auto"
       >
         <div>
           <h3 className="font-display text-lg font-bold text-foreground">{complaint.title}</h3>
@@ -386,6 +700,63 @@ function UpdateDialog({
             {complaint.complaint_id} · {complaint.address}
           </p>
         </div>
+
+        {/* Citizen "Before" Reported Photo Context for the Authority */}
+        {beforePhoto ? (
+          <div className="space-y-1.5 rounded-xl border border-border/80 bg-muted/20 p-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-foreground flex items-center gap-1.5">
+                <Camera className="h-3.5 w-3.5 text-primary" />
+                {t("reported_evidence_label")}
+              </span>
+              {!beforeImgError && onInspectImage ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onInspectImage(
+                      beforePhoto,
+                      `${complaint.title} — Reported Photo`,
+                      t("before_photo_label"),
+                    )
+                  }
+                  className="text-[11px] text-primary hover:underline flex items-center gap-1 cursor-pointer"
+                >
+                  <ZoomIn className="h-3 w-3" /> {t("click_to_enlarge")}
+                </button>
+              ) : null}
+            </div>
+
+            {!beforeImgError ? (
+              <div
+                onClick={() =>
+                  onInspectImage?.(
+                    beforePhoto,
+                    `${complaint.title} — Reported Photo`,
+                    t("before_photo_label"),
+                  )
+                }
+                className="group relative cursor-pointer overflow-hidden rounded-lg border border-border bg-black/5 max-h-36"
+              >
+                <img
+                  src={beforePhoto}
+                  alt="Citizen Reported Issue"
+                  onError={() => setBeforeImgError(true)}
+                  className="h-32 w-full object-cover transition-transform duration-300 group-hover:scale-102"
+                />
+                <span className="absolute bottom-1.5 left-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                  {t("before_photo_label")}
+                </span>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-destructive/30 bg-destructive/5 p-2.5 text-center">
+                <ImageOff className="h-4 w-4 text-destructive mx-auto mb-0.5" />
+                <p className="text-[11px] font-semibold text-destructive">
+                  {t("photo_load_failed")}
+                </p>
+              </div>
+            )}
+          </div>
+        ) : null}
 
         <div className="space-y-1.5">
           <label className="text-xs font-semibold text-foreground">New Status</label>

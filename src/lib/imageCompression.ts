@@ -8,7 +8,7 @@ export async function compressImage(
   file: File,
   maxWidth = 1280,
   maxHeight = 1280,
-  quality = 0.82,
+  quality = 0.8,
 ): Promise<{ dataUrl: string; blob: Blob }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -64,56 +64,342 @@ export async function compressImage(
 }
 
 /**
- * Uploads a complaint photo with seamless localStorage fallback.
+ * Attempts to upload an image to Supabase Storage ('complaint-images' bucket).
+ * Gracefully returns null if the bucket is missing, unconfigured, or offline,
+ * so caller can fall back cleanly without throwing network errors.
+ */
+export async function uploadComplaintImage(
+  fileOrBlob: File | Blob,
+  filenamePrefix = "issue",
+): Promise<string | null> {
+  try {
+    const ext =
+      fileOrBlob instanceof File && fileOrBlob.name.includes(".")
+        ? fileOrBlob.name.split(".").pop()
+        : fileOrBlob.type.includes("png")
+          ? "png"
+          : "jpg";
+    const filename = `${filenamePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const filePath = `complaints/${filename}`;
+
+    const { data, error } = await supabase.storage
+      .from("complaint-images")
+      .upload(filePath, fileOrBlob, {
+        contentType: fileOrBlob.type || "image/jpeg",
+        upsert: false,
+      });
+
+    if (error || !data) {
+      console.warn(
+        "[Storage] Upload complaint image returned error (bucket missing or inaccessible):",
+        error?.message,
+      );
+      return null;
+    }
+
+    const { data: pubData } = supabase.storage
+      .from("complaint-images")
+      .getPublicUrl(filePath);
+
+    return pubData?.publicUrl || null;
+  } catch (err) {
+    console.warn(
+      "[Storage] uploadComplaintImage network exception, falling back to data URL:",
+      err,
+    );
+    return null;
+  }
+}
+
+/**
+ * Saves a complaint photo with instant localStorage persistence.
  */
 export async function saveComplaintPhoto(
   file: File,
   complaintId: string,
   type: "before" | "after",
 ): Promise<string> {
-  const { dataUrl, blob } = await compressImage(file);
+  const { dataUrl } = await compressImage(file);
 
   // Always save to localStorage immediately for instant offline/zero-config fallback
-  try {
-    localStorage.setItem(`infratrack_${type}_photo_${complaintId}`, dataUrl);
-  } catch (err) {
-    console.warn("Could not save to localStorage (quota exceeded)", err);
-  }
-
-  // Try to upload to Supabase storage if the bucket exists
-  try {
-    const fileName = `${complaintId}/${type}-${Date.now()}.jpg`;
-    const { data, error } = await supabase.storage.from("complaint-images").upload(fileName, blob, {
-      contentType: "image/jpeg",
-      upsert: true,
-    });
-
-    if (!error && data) {
-      const { data: pubData } = supabase.storage.from("complaint-images").getPublicUrl(data.path);
-      if (pubData?.publicUrl) {
-        return pubData.publicUrl;
-      }
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem(`infratrack_${type}_photo_${complaintId}`, dataUrl);
+      localStorage.setItem(`infratrack_photo_${complaintId}`, dataUrl);
+    } catch (err) {
+      console.warn("Could not save to localStorage (quota exceeded)", err);
     }
-  } catch (err) {
-    console.warn("Supabase Storage upload fallback to local dataUrl", err);
   }
 
   return dataUrl;
 }
 
 /**
- * Retrieves a stored photo for a complaint (from localStorage or database fallback).
+ * Unified Photo Resolution Helper for Citizen "Before" Issue Photo.
+ * Required across all Citizen & Authority views:
+ * - Citizen My Complaints & Complaint Detail
+ * - Authority Admin Dashboard, Manage Complaints table/cards, and Complaint Detail / Resolution Modal
+ * - City / Infrastructure Map popups
  */
-export function getComplaintPhoto(
-  complaintId: string,
-  type: "before" | "after",
+export function getComplaintBeforePhoto(
+  complaint: unknown,
   fallbackUrl?: string | null,
 ): string | null {
+  if (!complaint) return fallbackUrl || null;
+
+  // If passed directly as a string (URL, data URL, or ID)
+  if (typeof complaint === "string") {
+    const trimmed = complaint.trim();
+    if (isValidImageUrlOrDataUrl(trimmed)) {
+      return trimmed;
+    }
+    return resolveFromLocalStorage(trimmed, "before") || fallbackUrl || null;
+  }
+
+  const rec = complaint as Record<string, unknown>;
+
+  // 1. Direct image URL / data URL fields on the complaint record
+  const candidateFields = [
+    rec.image_url,
+    rec.before_photo_url,
+    rec.before_image,
+    rec.photo_url,
+    rec.evidence_url,
+    rec.attachment_url,
+  ];
+
+  for (const candidate of candidateFields) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      const trimmed = candidate.trim();
+
+      // Check if it's a valid Data URL
+      if (trimmed.startsWith("data:image/")) {
+        if (isValidDataUrl(trimmed)) {
+          return trimmed;
+        }
+        continue;
+      }
+
+      // Check if it's a web URL (http, https, blob, absolute path)
+      if (
+        trimmed.startsWith("http://") ||
+        trimmed.startsWith("https://") ||
+        trimmed.startsWith("blob:") ||
+        trimmed.startsWith("/")
+      ) {
+        return trimmed;
+      }
+
+      // Check if it's a relative Supabase Storage path
+      if (
+        trimmed.includes("/") ||
+        trimmed.endsWith(".jpg") ||
+        trimmed.endsWith(".png") ||
+        trimmed.endsWith(".webp")
+      ) {
+        try {
+          const cleanPath = trimmed.replace(/^complaint-images\//, "");
+          const { data } = supabase.storage.from("complaint-images").getPublicUrl(cleanPath);
+          if (data?.publicUrl) {
+            return data.publicUrl;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  // 2. localStorage fallback keys (checks id, complaint_id, and infratrack_local_complaints)
+  const id = typeof rec.id === "string" ? rec.id : null;
+  const complaintIdCode = typeof rec.complaint_id === "string" ? rec.complaint_id : null;
+
+  const localPhoto =
+    (id ? resolveFromLocalStorage(id, "before") : null) ||
+    (complaintIdCode ? resolveFromLocalStorage(complaintIdCode, "before") : null);
+
+  if (localPhoto) return localPhoto;
+
+  return fallbackUrl || null;
+}
+
+// Backward-compatible alias
+export const resolveBeforePhotoUrl = getComplaintBeforePhoto;
+
+/**
+ * Unified Photo Resolution Helper for Authority "After" Resolution Proof Photo.
+ */
+export function resolveAfterPhotoUrl(
+  complaint: unknown,
+  fallbackUrl?: string | null,
+): string | null {
+  if (!complaint) return fallbackUrl || null;
+
+  if (typeof complaint === "string") {
+    const trimmed = complaint.trim();
+    if (isValidImageUrlOrDataUrl(trimmed)) {
+      return trimmed;
+    }
+    return resolveFromLocalStorage(trimmed, "after") || fallbackUrl || null;
+  }
+
+  const rec = complaint as Record<string, unknown>;
+
+  const candidateFields = [
+    rec.after_photo_url,
+    rec.resolution_image_url,
+    rec.after_image,
+    rec.resolution_photo_url,
+    rec.resolved_image_url,
+  ];
+
+  for (const candidate of candidateFields) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      const trimmed = candidate.trim();
+      if (trimmed.startsWith("data:image/")) {
+        if (isValidDataUrl(trimmed)) return trimmed;
+        continue;
+      }
+      if (
+        trimmed.startsWith("http://") ||
+        trimmed.startsWith("https://") ||
+        trimmed.startsWith("blob:") ||
+        trimmed.startsWith("/")
+      ) {
+        return trimmed;
+      }
+      if (trimmed.includes("/") || trimmed.endsWith(".jpg") || trimmed.endsWith(".png")) {
+        try {
+          const cleanPath = trimmed.replace(/^complaint-images\//, "");
+          const { data } = supabase.storage.from("complaint-images").getPublicUrl(cleanPath);
+          if (data?.publicUrl) return data.publicUrl;
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  const id = typeof rec.id === "string" ? rec.id : null;
+  const complaintIdCode = typeof rec.complaint_id === "string" ? rec.complaint_id : null;
+
+  const localPhoto =
+    (id ? resolveFromLocalStorage(id, "after") : null) ||
+    (complaintIdCode ? resolveFromLocalStorage(complaintIdCode, "after") : null);
+
+  if (localPhoto) return localPhoto;
+
+  return fallbackUrl || null;
+}
+
+/**
+ * Helper to check localStorage for a given complaint ID or code.
+ */
+function resolveFromLocalStorage(keyId: string, type: "before" | "after"): string | null {
+  if (typeof window === "undefined" || !window.localStorage) return null;
+
+  const keys = [
+    `infratrack_${type}_photo_${keyId}`,
+    type === "before" ? `infratrack_photo_${keyId}` : `infratrack_resolution_photo_${keyId}`,
+    `infratrack_image_${keyId}`,
+    `infratrack_evidence_${keyId}`,
+    `infratrack_complaint_photo_${keyId}`,
+  ];
+
+  for (const k of keys) {
+    try {
+      const val = localStorage.getItem(k);
+      if (val && typeof val === "string") {
+        const trimmed = val.trim();
+        if (trimmed.startsWith("data:image/")) {
+          if (isValidDataUrl(trimmed)) return trimmed;
+        } else if (
+          trimmed.startsWith("http://") ||
+          trimmed.startsWith("https://") ||
+          trimmed.startsWith("blob:") ||
+          trimmed.startsWith("/")
+        ) {
+          return trimmed;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Also check shared infratrack_local_complaints store
   try {
-    const local = localStorage.getItem(`infratrack_${type}_photo_${complaintId}`);
-    if (local) return local;
+    const raw = localStorage.getItem("infratrack_local_complaints");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const found = parsed.find(
+          (c: any) => c && (c.id === keyId || c.complaint_id === keyId),
+        );
+        if (found) {
+          const candidate =
+            type === "before"
+              ? found.image_url || found.before_photo_url || found.before_image
+              : found.after_photo_url || found.resolution_image_url || found.after_image;
+          if (candidate && typeof candidate === "string") {
+            const trimmed = candidate.trim();
+            if (trimmed.startsWith("data:image/")) {
+              if (isValidDataUrl(trimmed)) return trimmed;
+            } else if (
+              trimmed.startsWith("http://") ||
+              trimmed.startsWith("https://") ||
+              trimmed.startsWith("blob:") ||
+              trimmed.startsWith("/")
+            ) {
+              return trimmed;
+            }
+          }
+        }
+      }
+    }
   } catch {
     // ignore
   }
-  return fallbackUrl || null;
+
+  return null;
+}
+
+/**
+ * Validates that a string is a well-formed data URL and not truncated.
+ */
+function isValidDataUrl(str: string): boolean {
+  if (!str.startsWith("data:image/")) return false;
+  const commaIdx = str.indexOf(",");
+  if (commaIdx === -1) return false;
+  const base64Data = str.slice(commaIdx + 1);
+  return base64Data.length > 200 && !base64Data.endsWith("...");
+}
+
+/**
+ * Checks if a string is a valid web or data URL.
+ */
+function isValidImageUrlOrDataUrl(str: string): boolean {
+  if (str.startsWith("data:image/")) {
+    return isValidDataUrl(str);
+  }
+  return (
+    str.startsWith("http://") ||
+    str.startsWith("https://") ||
+    str.startsWith("blob:") ||
+    str.startsWith("/")
+  );
+}
+
+/**
+ * Retrieves a stored photo for a complaint (backwards-compatible wrapper).
+ */
+export function getComplaintPhoto(
+  complaintIdOrObj: unknown,
+  type: "before" | "after",
+  fallbackUrl?: string | null,
+): string | null {
+  if (type === "after") {
+    return resolveAfterPhotoUrl(complaintIdOrObj, fallbackUrl);
+  }
+  return resolveBeforePhotoUrl(complaintIdOrObj, fallbackUrl);
 }

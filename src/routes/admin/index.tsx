@@ -7,6 +7,8 @@ import { StatCard } from "@/components/StatCard";
 import { StatusBadge, PriorityBadge } from "@/components/Badges";
 import { MapPanel } from "@/components/MapPanel";
 import { fetchComplaints } from "@/lib/complaints";
+import { getComplaintBeforePhoto } from "@/lib/imageCompression";
+import { getUpvotesCount } from "@/lib/upvotes";
 import { categoryLabel, formatDate } from "@/lib/infratrack";
 
 export const Route = createFileRoute("/admin/")({
@@ -65,25 +67,41 @@ function AdminDashboard() {
           <p className="p-5 text-sm text-muted-foreground">Loading…</p>
         ) : (
           <ul className="divide-y">
-            {latest.map((c) => (
-              <li key={c.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
-                <div className="min-w-0 flex-1">
-                  <Link
-                    to="/complaints/$id"
-                    params={{ id: c.id }}
-                    className="font-medium hover:text-primary"
-                  >
-                    {c.title}
-                  </Link>
-                  <p className="text-xs text-muted-foreground">
-                    {c.complaint_id} · {categoryLabel(c.category)} · {c.area ?? c.address} ·{" "}
-                    {formatDate(c.created_at)}
-                  </p>
-                </div>
-                <PriorityBadge priority={c.priority} />
-                <StatusBadge status={c.status} />
-              </li>
-            ))}
+            {latest.map((c) => {
+              const photo = getComplaintBeforePhoto(c);
+              const upvotes = getUpvotesCount(c.id, c.complaint_id);
+              return (
+                <li key={c.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
+                  {photo ? (
+                    <div className="relative h-10 w-10 flex-shrink-0 overflow-hidden rounded-lg border border-border bg-black/5">
+                      <img
+                        src={photo}
+                        alt={c.title}
+                        onError={(e) => {
+                          (e.currentTarget.parentElement as HTMLElement).style.display = "none";
+                        }}
+                        className="h-full w-full object-cover"
+                      />
+                    </div>
+                  ) : null}
+                  <div className="min-w-0 flex-1">
+                    <Link
+                      to="/complaints/$id"
+                      params={{ id: c.id }}
+                      className="font-medium hover:text-primary"
+                    >
+                      {c.title}
+                    </Link>
+                    <p className="text-xs text-muted-foreground">
+                      {c.complaint_id} · {categoryLabel(c.category)} · {c.area ?? c.address} ·{" "}
+                      {formatDate(c.created_at)}
+                    </p>
+                  </div>
+                  <PriorityBadge priority={c.priority} upvotes={upvotes} />
+                  <StatusBadge status={c.status} />
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

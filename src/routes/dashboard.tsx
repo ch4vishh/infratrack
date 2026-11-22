@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useLanguage } from "@/lib/i18n";
 import { fetchComplaints } from "@/lib/complaints";
 import { getUpvotesCount } from "@/lib/upvotes";
+import { getComplaintBeforePhoto } from "@/lib/imageCompression";
 import { categoryLabel, formatDate } from "@/lib/infratrack";
 import { Button } from "@/components/ui/button";
 
@@ -100,33 +101,48 @@ function Dashboard() {
           <p className="p-6 text-sm text-muted-foreground">{t("no_complaints")}</p>
         ) : (
           <ul className="divide-y divide-border/60">
-            {recent.map((c) => (
-              <li
-                key={c.id}
-                className="flex flex-wrap items-center gap-3 px-6 py-3.5 hover:bg-background/40 transition-colors"
-              >
-                <div className="min-w-0 flex-1">
-                  <Link
-                    to="/complaints/$id"
-                    params={{ id: c.id }}
-                    className="font-medium text-foreground hover:text-primary transition-colors"
-                  >
-                    {c.title}
-                  </Link>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {c.complaint_id} · {categoryLabel(c.category)} · {formatDate(c.created_at)}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <PriorityBadge
-                    priority={c.priority}
-                    upvotes={getUpvotesCount(c.id, c.complaint_id)}
-                  />
-                  <StatusBadge status={c.status} />
-                  <UpvoteButton complaintId={c.id} complaintCode={c.complaint_id} size="xs" />
-                </div>
-              </li>
-            ))}
+            {recent.map((c) => {
+              const photo = getComplaintBeforePhoto(c);
+              return (
+                <li
+                  key={c.id}
+                  className="flex flex-wrap items-center gap-3 px-6 py-3.5 hover:bg-background/40 transition-colors"
+                >
+                  {photo ? (
+                    <div className="relative h-10 w-10 flex-shrink-0 overflow-hidden rounded-lg border border-border bg-black/5">
+                      <img
+                        src={photo}
+                        alt={c.title}
+                        onError={(e) => {
+                          (e.currentTarget.parentElement as HTMLElement).style.display = "none";
+                        }}
+                        className="h-full w-full object-cover"
+                      />
+                    </div>
+                  ) : null}
+                  <div className="min-w-0 flex-1">
+                    <Link
+                      to="/complaints/$id"
+                      params={{ id: c.id }}
+                      className="font-medium text-foreground hover:text-primary transition-colors"
+                    >
+                      {c.title}
+                    </Link>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {c.complaint_id} · {categoryLabel(c.category)} · {formatDate(c.created_at)}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <PriorityBadge
+                      priority={c.priority}
+                      upvotes={getUpvotesCount(c.id, c.complaint_id)}
+                    />
+                    <StatusBadge status={c.status} />
+                    <UpvoteButton complaintId={c.id} complaintCode={c.complaint_id} size="xs" />
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

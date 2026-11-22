@@ -5,6 +5,7 @@ import { Link } from "@tanstack/react-router";
 import { categoryLabel, formatDate, priorityLabel, statusLabel } from "@/lib/infratrack";
 import { UpvoteButton } from "@/components/UpvoteButton";
 import { getUpvotesCount } from "@/lib/upvotes";
+import { getComplaintBeforePhoto } from "@/lib/imageCompression";
 
 export type MapComplaint = {
   id: string;
@@ -18,6 +19,7 @@ export type MapComplaint = {
   latitude: number;
   longitude: number;
   created_at: string;
+  image_url?: string | null;
 };
 
 const priorityColor: Record<string, string> = {
@@ -110,6 +112,7 @@ export default function ComplaintMap({
         {complaints.map((c) => {
           const upvotes = getUpvotesCount(c.id, c.complaint_id);
           const isVerified = upvotes >= 5;
+          const photoUrl = getComplaintBeforePhoto(c);
 
           return (
             <Marker
@@ -125,6 +128,19 @@ export default function ComplaintMap({
                       {statusLabel(c.status)}
                     </span>
                   </div>
+
+                  {photoUrl ? (
+                    <div className="relative h-24 w-full overflow-hidden rounded-md border border-border bg-black/5">
+                      <img
+                        src={photoUrl}
+                        alt={c.title}
+                        onError={(e) => {
+                          (e.currentTarget.parentElement as HTMLElement).style.display = "none";
+                        }}
+                        className="h-full w-full object-cover"
+                      />
+                    </div>
+                  ) : null}
 
                   <p className="font-bold text-sm text-foreground leading-tight">{c.title}</p>
                   <p className="text-muted-foreground line-clamp-2">{c.description}</p>

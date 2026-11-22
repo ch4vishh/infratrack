@@ -25,7 +25,7 @@ import { UpvoteButton } from "@/components/UpvoteButton";
 import { PerformanceLeaderboard } from "@/components/PerformanceLeaderboard";
 import { CivicBlueprintPattern } from "@/components/CivicBlueprintPattern";
 import { getUpvotesCount } from "@/lib/upvotes";
-import { getComplaintPhoto } from "@/lib/imageCompression";
+import { getComplaintPhoto, getComplaintBeforePhoto } from "@/lib/imageCompression";
 import { formatDate } from "@/lib/infratrack";
 
 export const Route = createFileRoute("/")({
@@ -368,7 +368,7 @@ function Landing() {
             ) : (
               recentComplaints.map((item) => {
                 const upvotes = getUpvotesCount(item.id, item.complaint_id);
-                const beforePhoto = getComplaintPhoto(item.id, "before", item.image_url);
+                const beforePhoto = getComplaintBeforePhoto(item);
 
                 return (
                   <div
@@ -382,6 +382,9 @@ function Landing() {
                           <img
                             src={beforePhoto}
                             alt={item.title}
+                            onError={(e) => {
+                              (e.currentTarget.parentElement as HTMLElement).style.display = "none";
+                            }}
                             className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                           />
                           <span className="absolute bottom-1.5 left-1.5 rounded-sm bg-black/70 px-1.5 py-0.5 text-[9px] font-bold text-white backdrop-blur-2xs">

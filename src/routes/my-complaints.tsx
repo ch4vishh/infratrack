@@ -9,6 +9,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useLanguage } from "@/lib/i18n";
 import { fetchComplaints } from "@/lib/complaints";
 import { getUpvotesCount } from "@/lib/upvotes";
+import { getComplaintBeforePhoto } from "@/lib/imageCompression";
 import { CATEGORIES, STATUSES, categoryLabel, formatDate } from "@/lib/infratrack";
 import { Input } from "@/components/ui/input";
 
@@ -128,20 +129,39 @@ function MyComplaints() {
             ) : (
               rows.map((c) => {
                 const upvotes = getUpvotesCount(c.id, c.complaint_id);
+                const beforePhoto = getComplaintBeforePhoto(c);
+
                 return (
                   <tr key={c.id} className="hover:bg-muted/40 transition-colors">
                     <td className="px-4 py-3 font-mono text-xs font-bold text-foreground">
                       {c.complaint_id}
                     </td>
                     <td className="px-4 py-3">
-                      <Link
-                        to="/complaints/$id"
-                        params={{ id: c.id }}
-                        className="font-medium text-foreground hover:text-primary transition-colors"
-                      >
-                        {c.title}
-                      </Link>
-                      <p className="text-xs text-muted-foreground line-clamp-1">{c.address}</p>
+                      <div className="flex items-center gap-2.5">
+                        {beforePhoto ? (
+                          <div className="relative h-9 w-9 flex-shrink-0 overflow-hidden rounded-md border border-border bg-black/5">
+                            <img
+                              src={beforePhoto}
+                              alt={c.title}
+                              onError={(e) => {
+                                (e.currentTarget.parentElement as HTMLElement).style.display =
+                                  "none";
+                              }}
+                              className="h-full w-full object-cover"
+                            />
+                          </div>
+                        ) : null}
+                        <div className="min-w-0">
+                          <Link
+                            to="/complaints/$id"
+                            params={{ id: c.id }}
+                            className="font-medium text-foreground hover:text-primary transition-colors line-clamp-1"
+                          >
+                            {c.title}
+                          </Link>
+                          <p className="text-xs text-muted-foreground line-clamp-1">{c.address}</p>
+                        </div>
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-xs">{categoryLabel(c.category)}</td>
                     <td className="px-4 py-3">
