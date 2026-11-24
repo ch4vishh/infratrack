@@ -6,6 +6,7 @@ import { categoryLabel, formatDate, priorityLabel, statusLabel } from "@/lib/inf
 import { UpvoteButton } from "@/components/UpvoteButton";
 import { getUpvotesCount } from "@/lib/upvotes";
 import { getComplaintBeforePhoto } from "@/lib/imageCompression";
+import { getEffectiveStatus } from "@/lib/complaints";
 
 export type MapComplaint = {
   id: string;
@@ -125,7 +126,7 @@ export default function ComplaintMap({
                   <div className="flex items-center justify-between border-b pb-1">
                     <span className="font-mono font-bold text-foreground">{c.complaint_id}</span>
                     <span className="text-[10px] text-muted-foreground">
-                      {statusLabel(c.status)}
+                      {statusLabel(getEffectiveStatus(c))}
                     </span>
                   </div>
 

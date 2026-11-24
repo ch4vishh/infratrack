@@ -12,7 +12,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
-import type { Complaint, Department } from "@/lib/complaints";
+import { getEffectiveStatus, type Complaint, type Department } from "@/lib/complaints";
 import { cn } from "@/lib/utils";
 
 interface LeaderboardItem {
@@ -42,7 +42,7 @@ export function PerformanceLeaderboard({
     return departments
       .map((d) => {
         const deptComplaints = complaints.filter((c) => c.department_id === d.id);
-        const resolvedList = deptComplaints.filter((c) => c.status === "resolved");
+        const resolvedList = deptComplaints.filter((c) => getEffectiveStatus(c) === "resolved");
         const total = deptComplaints.length;
         const resolved = resolvedList.length;
         const active = total - resolved;
@@ -92,7 +92,7 @@ export function PerformanceLeaderboard({
 
     return Array.from(wardMap.entries())
       .map(([name, wardComplaints]) => {
-        const resolvedList = wardComplaints.filter((c) => c.status === "resolved");
+        const resolvedList = wardComplaints.filter((c) => getEffectiveStatus(c) === "resolved");
         const total = wardComplaints.length;
         const resolved = resolvedList.length;
         const active = total - resolved;
@@ -160,9 +160,9 @@ export function PerformanceLeaderboard({
                     "inline-flex items-center justify-center rounded-lg px-2.5 py-1 text-xs font-black shadow-2xs",
                     index === 0 && "bg-accent/25 text-accent-foreground border border-accent/40",
                     index === 1 &&
-                      "bg-slate-200/80 text-slate-800 border border-slate-300 dark:bg-slate-800 dark:text-slate-200",
+                    "bg-slate-200/80 text-slate-800 border border-slate-300 dark:bg-slate-800 dark:text-slate-200",
                     index === 2 &&
-                      "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-950/60 dark:text-amber-200",
+                    "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-950/60 dark:text-amber-200",
                   )}
                 >
                   #{index + 1}
@@ -266,11 +266,11 @@ export function PerformanceLeaderboard({
                 className={cn(
                   "inline-flex items-center justify-center rounded-lg px-2.5 py-1 text-xs font-black shadow-2xs",
                   index === 0 &&
-                    "bg-accent/25 text-accent-foreground border border-accent/40 ring-2 ring-accent/20",
+                  "bg-accent/25 text-accent-foreground border border-accent/40 ring-2 ring-accent/20",
                   index === 1 &&
-                    "bg-slate-200/90 text-slate-900 border border-slate-300 dark:bg-slate-800 dark:text-slate-100",
+                  "bg-slate-200/90 text-slate-900 border border-slate-300 dark:bg-slate-800 dark:text-slate-100",
                   index === 2 &&
-                    "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-950/60 dark:text-amber-200",
+                  "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-950/60 dark:text-amber-200",
                   index > 2 && "bg-muted text-muted-foreground border border-border/80",
                 )}
               >

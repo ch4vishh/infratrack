@@ -1,6 +1,11 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { Status } from "@/lib/infratrack";
 import { statusLabel } from "@/lib/infratrack";
+import {
+  resolveAfterPhotoUrl,
+  getAfterPhotoUrl,
+  getBeforePhotoUrl,
+} from "@/lib/imageCompression";
 
 export type Complaint = {
   id: string;
@@ -210,9 +215,22 @@ export async function fetchComplaints(filters?: { userId?: string }): Promise<Co
     }
   }
 
-  // Sort by created_at descending
+  // Sort by created_at descending and normalize effective status
   combined.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  return combined;
+
+  return combined.map((c) => {
+    const effectiveStatus = getEffectiveStatus(c);
+    const resolvedPhoto = resolveAfterPhotoUrl(c);
+    return {
+      ...c,
+      status: effectiveStatus,
+      after_image_url: resolvedPhoto || c.after_image_url || null,
+      resolved_at:
+        effectiveStatus === "resolved"
+          ? c.resolved_at || c.updated_at || new Date().toISOString()
+          : c.resolved_at,
+    };
+  });
 }
 
 /** Fetch departments with reliable default fallback */
@@ -309,6 +327,93 @@ export async function notify(
   }
 }
 
+export type HistoryRow = {
+  id: string;
+  complaint_id?: string;
+  new_status: string;
+  old_status: string | null;
+  remarks: string | null;
+  changed_at: string;
+};
+
+/** Get local status history entries for a complaint */
+export function getLocalStatusHistory(complaintId: string): HistoryRow[] {
+  if (typeof window === "undefined" || !complaintId) return [];
+  try {
+    const raw = localStorage.getItem(`infratrack_status_history_${complaintId}`);
+    if (raw) {
+      return JSON.parse(raw) as HistoryRow[];
+    }
+  } catch {}
+  return [];
+}
+
+/** Save a local status history entry for a complaint */
+export function saveLocalStatusHistory(complaintId: string, entry: HistoryRow): void {
+  if (typeof window === "undefined" || !complaintId) return;
+  try {
+    const existing = getLocalStatusHistory(complaintId);
+    const idx = existing.findIndex(
+      (e) => e.new_status === entry.new_status && e.changed_at === entry.changed_at,
+    );
+    if (idx >= 0) {
+      existing[idx] = entry;
+    } else {
+      existing.push(entry);
+    }
+    localStorage.setItem(`infratrack_status_history_${complaintId}`, JSON.stringify(existing));
+    window.dispatchEvent(
+      new CustomEvent("infratrack-history-updated", { detail: { complaintId, entry } }),
+    );
+  } catch {}
+}
+
+/**
+ * Resolves the effective status of a complaint by normalizing local overrides,
+ * resolution photo presence, and status history.
+ * If a complaint has an After (Resolved) photo attached or a resolved entry,
+ * its effective status is guaranteed to be 'resolved'.
+ */
+export function getEffectiveStatus(complaint: unknown): Status {
+  if (!complaint) return "pending";
+
+  const rec = (typeof complaint === "object" ? complaint : {}) as Record<string, unknown>;
+  const id = typeof rec.id === "string" ? rec.id : "";
+  const code = typeof rec.complaint_id === "string" ? rec.complaint_id : "";
+
+  // 1. Direct status on record
+  if (rec.status === "resolved") {
+    return "resolved";
+  }
+
+  // 2. Check local complaint store override
+  if (id || code) {
+    const local = getLocalComplaintById(id || code);
+    if (local?.status === "resolved") {
+      return "resolved";
+    }
+  }
+
+  // 3. Presence of After (Resolved) photo
+  const afterPhoto = resolveAfterPhotoUrl(complaint);
+  if (afterPhoto) {
+    return "resolved";
+  }
+
+  // 4. Local status history check
+  if (id || code) {
+    const localHistory = [
+      ...getLocalStatusHistory(id),
+      ...(code ? getLocalStatusHistory(code) : []),
+    ];
+    if (localHistory.some((h) => h.new_status === "resolved")) {
+      return "resolved";
+    }
+  }
+
+  return (rec.status as Status) || "pending";
+}
+
 /** Update a complaint's status, log history, attach after photo, and automatically notify the citizen. */
 export async function updateStatus(
   complaint: Complaint,
@@ -318,11 +423,15 @@ export async function updateStatus(
   afterImageUrl?: string | null,
   lang: "en" | "hi" = "en",
 ) {
+  // Enforce 'resolved' whenever afterImageUrl is provided or newStatus is 'resolved'
+  const effectiveNewStatus: Status =
+    afterImageUrl || newStatus === "resolved" ? "resolved" : newStatus;
   const now = new Date().toISOString();
+
   const patch: Partial<Complaint> = {
-    status: newStatus,
+    status: effectiveNewStatus,
     remarks: remarks || complaint.remarks,
-    resolved_at: newStatus === "resolved" ? now : complaint.resolved_at,
+    resolved_at: effectiveNewStatus === "resolved" ? complaint.resolved_at || now : null,
     updated_at: now,
   };
 
@@ -332,8 +441,31 @@ export async function updateStatus(
 
   // 1. Immediately update in unified local persistent store
   updateLocalComplaint(complaint.id, patch);
+  if (complaint.complaint_id) {
+    updateLocalComplaint(complaint.complaint_id, patch);
+  }
 
-  // Cache after photo in localStorage keyed by both UUID and complaint code
+  // 2. Persist local status history entry
+  const historyEntry: HistoryRow = {
+    id: `hist-${complaint.id}-${Date.now()}`,
+    complaint_id: complaint.id,
+    old_status: complaint.status as Status,
+    new_status: effectiveNewStatus,
+    remarks:
+      remarks ||
+      (effectiveNewStatus === "resolved"
+        ? lang === "hi"
+          ? "कार्य पूर्ण एवं फोटो प्रमाण द्वारा सत्यापित।"
+          : "Resolution verified and completed on-site with photographic proof."
+        : null),
+    changed_at: now,
+  };
+  saveLocalStatusHistory(complaint.id, historyEntry);
+  if (complaint.complaint_id) {
+    saveLocalStatusHistory(complaint.complaint_id, historyEntry);
+  }
+
+  // 3. Cache after photo in localStorage keyed by both UUID and complaint code
   if (afterImageUrl) {
     try {
       localStorage.setItem(`infratrack_after_photo_${complaint.id}`, afterImageUrl);
@@ -358,23 +490,28 @@ export async function updateStatus(
     }
   }
 
-  // 2. Sync to Supabase in background
+  // 4. Sync to Supabase in background
   try {
     const dbUpdate: Record<string, unknown> = {
-      status: newStatus,
+      status: effectiveNewStatus,
       remarks: remarks || complaint.remarks,
-      resolved_at: newStatus === "resolved" ? now : complaint.resolved_at,
+      resolved_at: effectiveNewStatus === "resolved" ? complaint.resolved_at || now : null,
     };
 
     try {
-      const payloadWithPhoto = afterImageUrl ? { ...dbUpdate, after_image_url: afterImageUrl } : dbUpdate;
+      const payloadWithPhoto = afterImageUrl
+        ? { ...dbUpdate, after_image_url: afterImageUrl }
+        : dbUpdate;
       const { error } = await supabase
         .from("complaints")
         .update(payloadWithPhoto as any)
         .eq("id", complaint.id);
 
       if (error) {
-        const { error: retryErr } = await supabase.from("complaints").update(dbUpdate).eq("id", complaint.id);
+        const { error: retryErr } = await supabase
+          .from("complaints")
+          .update(dbUpdate)
+          .eq("id", complaint.id);
         if (retryErr) console.warn("Supabase updateStatus error:", retryErr);
       }
     } catch {
@@ -384,19 +521,23 @@ export async function updateStatus(
     await supabase.from("status_history").insert({
       complaint_id: complaint.id,
       old_status: complaint.status as Status,
-      new_status: newStatus,
+      new_status: effectiveNewStatus,
       changed_by: actorId,
-      remarks: remarks || null,
+      remarks:
+        remarks ||
+        (effectiveNewStatus === "resolved"
+          ? "Issue resolved with photographic proof"
+          : null),
     });
   } catch (err) {
     console.warn("Could not sync status update to Supabase (offline/network issue):", err);
   }
 
-  // 3. Automatic Citizen Notification on Resolution or Status Change
+  // 5. Automatic Citizen Notification on Resolution or Status Change
   const targetUserId = complaint.user_id;
   if (targetUserId) {
     let notifMsg = "";
-    if (newStatus === "resolved") {
+    if (effectiveNewStatus === "resolved") {
       if (afterImageUrl) {
         notifMsg =
           lang === "hi"
@@ -411,8 +552,8 @@ export async function updateStatus(
     } else {
       notifMsg =
         lang === "hi"
-          ? `आपकी शिकायत ${complaint.complaint_id} की स्थिति अब ${statusLabel(newStatus)} है।`
-          : `Your complaint ${complaint.complaint_id} is now ${statusLabel(newStatus)}.`;
+          ? `आपकी शिकायत ${complaint.complaint_id} की स्थिति अब ${statusLabel(effectiveNewStatus)} है।`
+          : `Your complaint ${complaint.complaint_id} is now ${statusLabel(effectiveNewStatus)}.`;
     }
 
     await notify(targetUserId, complaint.id, notifMsg, {

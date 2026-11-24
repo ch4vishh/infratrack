@@ -28,6 +28,7 @@ import {
   fetchDepartments,
   updateStatus,
   updateLocalComplaint,
+  getEffectiveStatus,
   type Complaint,
 } from "@/lib/complaints";
 import { getUpvotesCount } from "@/lib/upvotes";
@@ -114,7 +115,7 @@ function ManageComplaints() {
   const rows = useMemo(() => {
     const filtered = data.filter(
       (c) =>
-        (status === "all" || c.status === status) &&
+        (status === "all" || getEffectiveStatus(c) === status) &&
         (category === "all" || c.category === category) &&
         (priority === "all" || c.priority === priority) &&
         (q === "" ||
@@ -368,7 +369,7 @@ function ManageComplaints() {
                       />
                     </td>
                     <td className="px-4 py-3">
-                      <StatusBadge status={c.status} />
+                      <StatusBadge status={getEffectiveStatus(c)} />
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-xs text-muted-foreground">
                       {formatDate(c.created_at)}
@@ -481,7 +482,7 @@ function AdminComplaintDetailModal({
                 {complaint.complaint_id}
               </span>
               <PriorityBadge priority={complaint.priority} upvotes={upvotes} />
-              <StatusBadge status={complaint.status} />
+              <StatusBadge status={getEffectiveStatus(complaint)} />
             </div>
             <h3 className="font-display text-xl font-bold text-foreground">{complaint.title}</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
@@ -671,7 +672,7 @@ function UpdateDialog({
 
   const existingAfterPhoto = resolveAfterPhotoUrl(complaint);
 
-  const [status, setStatus] = useState<Status>(complaint.status as Status);
+  const [status, setStatus] = useState<Status>(getEffectiveStatus(complaint));
   const [remarks, setRemarks] = useState("");
   const [proofFile, setProofFile] = useState<File | null>(null);
   const [proofPreview, setProofPreview] = useState<string | null>(existingAfterPhoto);
@@ -750,29 +751,65 @@ function UpdateDialog({
         }
       }
 
+      // Enforce status = 'resolved' whenever afterImageUrl is present or status is resolved
+      const isResolved = status === "resolved" || !!afterImageUrl;
+      const finalStatus: Status = isResolved ? "resolved" : status;
+      const now = new Date().toISOString();
+      const resolvedAt = isResolved ? complaint.resolved_at || now : null;
+
       await updateStatus(
         complaint,
-        status,
+        finalStatus,
         remarks,
         actorId,
         afterImageUrl,
         t("lang") as "en" | "hi",
       );
 
-      // Optimistically update query caches
+      // Optimistically update all complaints query caches
       qc.setQueriesData<Complaint[]>({ queryKey: ["complaints"] }, (old) => {
         if (!old) return old;
         return old.map((item) =>
           item.id === complaint.id
             ? {
-                ...item,
-                status,
-                remarks: remarks || item.remarks,
-                after_image_url: afterImageUrl,
-                resolved_at: status === "resolved" ? new Date().toISOString() : item.resolved_at,
-              }
+              ...item,
+              status: finalStatus,
+              remarks: remarks || item.remarks,
+              after_image_url: afterImageUrl,
+              resolved_at: resolvedAt,
+            }
             : item,
         );
+      });
+
+      // Also optimistically update single complaint query cache
+      qc.setQueryData(["complaint", complaint.id], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          complaint: {
+            ...old.complaint,
+            status: finalStatus,
+            remarks: remarks || old.complaint?.remarks,
+            after_image_url: afterImageUrl,
+            resolved_at: resolvedAt,
+          },
+          history: [
+            ...(old.history || []),
+            {
+              id: `hist-opt-${Date.now()}`,
+              complaint_id: complaint.id,
+              new_status: finalStatus,
+              old_status: complaint.status,
+              remarks:
+                remarks ||
+                (finalStatus === "resolved"
+                  ? "Resolution verified and completed on-site with photographic proof."
+                  : null),
+              changed_at: now,
+            },
+          ],
+        };
       });
 
       toast.success(`${complaint.complaint_id} updated successfully`);

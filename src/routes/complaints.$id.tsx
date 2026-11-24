@@ -30,6 +30,8 @@ import {
 } from "@/lib/imageCompression";
 import {
   getLocalComplaintById,
+  getLocalStatusHistory,
+  getEffectiveStatus,
   DEFAULT_DEPARTMENTS,
   type Complaint,
 } from "@/lib/complaints";
@@ -104,24 +106,84 @@ function Details() {
 
       if (!complaint) {
         complaint = getLocalComplaintById(id);
+      } else {
+        const local = getLocalComplaintById(id);
+        if (local) {
+          complaint = {
+            ...complaint,
+            ...local,
+            status:
+              local.status === "resolved" || complaint.status === "resolved"
+                ? "resolved"
+                : local.status || complaint.status,
+            after_image_url: local.after_image_url || complaint.after_image_url || null,
+            resolved_at: local.resolved_at || complaint.resolved_at || null,
+            remarks: local.remarks || complaint.remarks || null,
+          };
+        }
+      }
+
+      if (complaint) {
+        const effectiveStatus = getEffectiveStatus(complaint);
+        const resolvedPhoto = resolveAfterPhotoUrl(complaint);
+        complaint.status = effectiveStatus;
+        if (resolvedPhoto && !complaint.after_image_url) {
+          complaint.after_image_url = resolvedPhoto;
+        }
+        if (effectiveStatus === "resolved" && !complaint.resolved_at) {
+          complaint.resolved_at = complaint.updated_at || new Date().toISOString();
+        }
       }
 
       if (!departments || departments.length === 0) {
         departments = DEFAULT_DEPARTMENTS;
       }
 
-      if (history.length === 0 && complaint) {
-        history = [
-          {
-            id: `hist-${complaint.id}`,
-            complaint_id: complaint.id,
-            old_status: null,
-            new_status: (complaint.status as any) || "pending",
-            changed_at: complaint.created_at,
-            remarks: complaint.remarks || "Complaint submitted with location and evidence",
-          },
-        ];
+      // Merge remote history and local status history
+      const localHist = [
+        ...getLocalStatusHistory(id),
+        ...(complaint?.complaint_id ? getLocalStatusHistory(complaint.complaint_id) : []),
+      ];
+
+      const histMap = new Map<string, HistoryRow>();
+      for (const h of history) {
+        histMap.set(`${h.new_status}-${h.changed_at}`, h);
       }
+      for (const h of localHist) {
+        histMap.set(`${h.new_status}-${h.changed_at}`, h);
+      }
+
+      // If effective status is resolved, guarantee a resolved entry in the history timeline
+      if (
+        complaint &&
+        complaint.status === "resolved" &&
+        !Array.from(histMap.values()).some((h) => h.new_status === "resolved")
+      ) {
+        histMap.set("resolved-synthetic", {
+          id: `hist-res-${complaint.id}`,
+          new_status: "resolved",
+          old_status: "in_progress",
+          changed_at: complaint.resolved_at || complaint.updated_at || new Date().toISOString(),
+          remarks:
+            complaint.remarks ||
+            "Resolution verified and completed on-site with photographic proof.",
+        });
+      }
+
+      if (histMap.size === 0 && complaint) {
+        histMap.set("pending-initial", {
+          id: `hist-${complaint.id}`,
+          complaint_id: complaint.id,
+          old_status: null,
+          new_status: (complaint.status as any) || "pending",
+          changed_at: complaint.created_at,
+          remarks: complaint.remarks || "Complaint submitted with location and evidence",
+        });
+      }
+
+      history = Array.from(histMap.values()).sort(
+        (a, b) => new Date(a.changed_at).getTime() - new Date(b.changed_at).getTime(),
+      );
 
       return {
         complaint,
@@ -330,7 +392,12 @@ function Details() {
       <div className="space-y-6">
         <div className="rounded-2xl border border-border/80 bg-card p-6 shadow-card space-y-4">
           <h3 className="font-display text-lg font-bold text-foreground">Status Trail</h3>
-          <StatusTimeline status={c.status} history={data.history} />
+          <StatusTimeline
+            status={c.status}
+            history={data.history}
+            resolvedAt={c.resolved_at}
+            remarks={c.remarks}
+          />
           <div className="pt-2 border-t border-border/60">
             <Link to="/my-complaints" className="text-xs font-bold text-primary hover:underline">
               ← Back to My Complaints

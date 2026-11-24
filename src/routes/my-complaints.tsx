@@ -7,7 +7,7 @@ import { StatusBadge, PriorityBadge } from "@/components/Badges";
 import { UpvoteButton } from "@/components/UpvoteButton";
 import { useAuth } from "@/hooks/useAuth";
 import { useLanguage } from "@/lib/i18n";
-import { fetchComplaints } from "@/lib/complaints";
+import { fetchComplaints, getEffectiveStatus } from "@/lib/complaints";
 import { getUpvotesCount } from "@/lib/upvotes";
 import { getComplaintBeforePhoto } from "@/lib/imageCompression";
 import { CATEGORIES, STATUSES, categoryLabel, formatDate } from "@/lib/infratrack";
@@ -53,7 +53,7 @@ function MyComplaints() {
     () =>
       data.filter(
         (c) =>
-          (status === "all" || c.status === status) &&
+          (status === "all" || getEffectiveStatus(c) === status) &&
           (category === "all" || c.category === category) &&
           (q === "" ||
             `${c.title} ${c.description} ${c.address} ${c.complaint_id}`
@@ -176,7 +176,7 @@ function MyComplaints() {
                       />
                     </td>
                     <td className="px-4 py-3">
-                      <StatusBadge status={c.status} />
+                      <StatusBadge status={getEffectiveStatus(c)} />
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-xs text-muted-foreground">
                       {formatDate(c.created_at)}

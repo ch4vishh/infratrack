@@ -16,7 +16,7 @@ import {
   Sparkles,
   Workflow,
 } from "lucide-react";
-import { fetchComplaints, fetchDepartments } from "@/lib/complaints";
+import { fetchComplaints, fetchDepartments, getEffectiveStatus } from "@/lib/complaints";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
 import { useLanguage, LanguageToggle } from "@/lib/i18n";
@@ -60,10 +60,11 @@ function Landing() {
     queryFn: fetchDepartments,
   });
 
-  const resolved = complaints.filter((c) => c.status === "resolved").length;
-  const inProgress = complaints.filter(
-    (c) => c.status === "in_progress" || c.status === "assigned",
-  ).length;
+  const resolved = complaints.filter((c) => getEffectiveStatus(c) === "resolved").length;
+  const inProgress = complaints.filter((c) => {
+    const s = getEffectiveStatus(c);
+    return s === "in_progress" || s === "assigned";
+  }).length;
   const open = complaints.length - resolved;
   const resolutionRate =
     complaints.length > 0 ? Math.round((resolved / complaints.length) * 100) : 0;
@@ -399,7 +400,7 @@ function Landing() {
                         </span>
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <PriorityBadge priority={item.priority} upvotes={upvotes} />
-                          <StatusBadge status={item.status} />
+                          <StatusBadge status={getEffectiveStatus(item)} />
                         </div>
                       </div>
 

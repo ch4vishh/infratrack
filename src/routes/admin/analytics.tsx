@@ -20,7 +20,7 @@ import { RequireAuth } from "@/components/RequireAuth";
 import { AppShell } from "@/components/AppShell";
 import { PerformanceLeaderboard } from "@/components/PerformanceLeaderboard";
 import { useLanguage } from "@/lib/i18n";
-import { fetchComplaints, fetchDepartments } from "@/lib/complaints";
+import { fetchComplaints, fetchDepartments, getEffectiveStatus } from "@/lib/complaints";
 import { CATEGORIES, STATUSES, categoryLabel, statusLabel } from "@/lib/infratrack";
 
 export const Route = createFileRoute("/admin/analytics")({
@@ -89,7 +89,7 @@ function Analytics() {
     () =>
       STATUSES.map((s) => ({
         name: statusLabel(s.value),
-        value: complaints.filter((x) => x.status === s.value).length,
+        value: complaints.filter((x) => getEffectiveStatus(x) === s.value).length,
       })).filter((r) => r.value > 0),
     [complaints],
   );
@@ -99,10 +99,14 @@ function Analytics() {
       departments.map((d) => ({
         name: d.name.replace(" Department", ""),
         open: complaints.filter(
-          (c) => c.department_id === d.id && c.status !== "resolved" && c.status !== "rejected",
+          (c) =>
+            c.department_id === d.id &&
+            getEffectiveStatus(c) !== "resolved" &&
+            getEffectiveStatus(c) !== "rejected",
         ).length,
-        resolved: complaints.filter((c) => c.department_id === d.id && c.status === "resolved")
-          .length,
+        resolved: complaints.filter(
+          (c) => c.department_id === d.id && getEffectiveStatus(c) === "resolved",
+        ).length,
       })),
     [complaints, departments],
   );

@@ -6,7 +6,7 @@ import { AppShell } from "@/components/AppShell";
 import { StatCard } from "@/components/StatCard";
 import { StatusBadge, PriorityBadge } from "@/components/Badges";
 import { MapPanel } from "@/components/MapPanel";
-import { fetchComplaints } from "@/lib/complaints";
+import { fetchComplaints, getEffectiveStatus } from "@/lib/complaints";
 import { getComplaintBeforePhoto } from "@/lib/imageCompression";
 import { getUpvotesCount } from "@/lib/upvotes";
 import { categoryLabel, formatDate } from "@/lib/infratrack";
@@ -38,8 +38,8 @@ function AdminDashboard() {
     queryFn: () => fetchComplaints(),
   });
 
-  const count = (s: string) => data.filter((c) => c.status === s).length;
-  const highOpen = data.filter((c) => c.priority === "high" && c.status !== "resolved");
+  const count = (s: string) => data.filter((c) => getEffectiveStatus(c) === s).length;
+  const highOpen = data.filter((c) => c.priority === "high" && getEffectiveStatus(c) !== "resolved");
   const latest = data.slice(0, 8);
 
   return (
@@ -98,7 +98,7 @@ function AdminDashboard() {
                     </p>
                   </div>
                   <PriorityBadge priority={c.priority} upvotes={upvotes} />
-                  <StatusBadge status={c.status} />
+                  <StatusBadge status={getEffectiveStatus(c)} />
                 </li>
               );
             })}

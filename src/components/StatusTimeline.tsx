@@ -10,7 +10,17 @@ export type HistoryRow = {
   changed_at: string;
 };
 
-export function StatusTimeline({ status, history }: { status: string; history: HistoryRow[] }) {
+export function StatusTimeline({
+  status,
+  history,
+  resolvedAt,
+  remarks,
+}: {
+  status: string;
+  history: HistoryRow[];
+  resolvedAt?: string | null;
+  remarks?: string | null;
+}) {
   if (status === "rejected") {
     const rejected = history.find((h) => h.new_status === "rejected");
     return (
@@ -31,6 +41,12 @@ export function StatusTimeline({ status, history }: { status: string; history: H
       {STATUS_FLOW.map((step, i) => {
         const reached = i <= currentIndex;
         const entry = [...history].reverse().find((h) => h.new_status === step);
+        const timestamp =
+          entry?.changed_at || (step === "resolved" && reached ? resolvedAt : null);
+        const stepRemarks =
+          entry?.remarks ||
+          (step === "resolved" && reached ? remarks || "Resolution verified and completed on-site with photographic proof." : null);
+
         return (
           <li key={step} className="flex gap-3">
             <div className="flex flex-col items-center">
@@ -55,10 +71,10 @@ export function StatusTimeline({ status, history }: { status: string; history: H
                 {step === "pending" ? "Submitted" : statusLabel(step)}
               </p>
               <p className="text-xs text-muted-foreground">
-                {entry ? formatDateTime(entry.changed_at) : "Awaiting update"}
+                {timestamp ? formatDateTime(timestamp) : "Awaiting update"}
               </p>
-              {entry?.remarks ? (
-                <p className="mt-1 text-sm text-muted-foreground">{entry.remarks}</p>
+              {stepRemarks ? (
+                <p className="mt-1 text-sm text-muted-foreground">{stepRemarks}</p>
               ) : null}
             </div>
           </li>

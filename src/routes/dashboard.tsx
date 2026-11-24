@@ -9,7 +9,7 @@ import { UpvoteButton } from "@/components/UpvoteButton";
 import { MapPanel } from "@/components/MapPanel";
 import { useAuth } from "@/hooks/useAuth";
 import { useLanguage } from "@/lib/i18n";
-import { fetchComplaints } from "@/lib/complaints";
+import { fetchComplaints, getEffectiveStatus } from "@/lib/complaints";
 import { getUpvotesCount } from "@/lib/upvotes";
 import { getComplaintBeforePhoto } from "@/lib/imageCompression";
 import { categoryLabel, formatDate } from "@/lib/infratrack";
@@ -49,7 +49,7 @@ function Dashboard() {
     enabled: !!user,
   });
 
-  const count = (s: string) => mine.filter((c) => c.status === s).length;
+  const count = (s: string) => mine.filter((c) => getEffectiveStatus(c) === s).length;
   const recent = mine.slice(0, 5);
 
   return (
@@ -137,7 +137,7 @@ function Dashboard() {
                       priority={c.priority}
                       upvotes={getUpvotesCount(c.id, c.complaint_id)}
                     />
-                    <StatusBadge status={c.status} />
+                    <StatusBadge status={getEffectiveStatus(c)} />
                     <UpvoteButton complaintId={c.id} complaintCode={c.complaint_id} size="xs" />
                   </div>
                 </li>

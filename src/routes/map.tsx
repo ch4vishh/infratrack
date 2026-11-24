@@ -3,7 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { ShieldCheck } from "lucide-react";
 import { MapPanel } from "@/components/MapPanel";
-import { fetchComplaints } from "@/lib/complaints";
+import { fetchComplaints, getEffectiveStatus } from "@/lib/complaints";
 import { CATEGORIES, STATUSES, PRIORITIES } from "@/lib/infratrack";
 import { useAuth } from "@/hooks/useAuth";
 import { useLanguage, LanguageToggle } from "@/lib/i18n";
@@ -73,7 +73,7 @@ function MapView() {
       complaints.filter(
         (c) =>
           (category === "all" || c.category === category) &&
-          (status === "all" || c.status === status) &&
+          (status === "all" || getEffectiveStatus(c) === status) &&
           (priority === "all" || c.priority === priority),
       ),
     [complaints, category, status, priority],
