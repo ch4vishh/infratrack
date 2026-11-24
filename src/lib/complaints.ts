@@ -326,7 +326,7 @@ export async function updateStatus(
     updated_at: now,
   };
 
-  if (afterImageUrl) {
+  if (afterImageUrl !== undefined) {
     patch.after_image_url = afterImageUrl;
   }
 
@@ -345,6 +345,17 @@ export async function updateStatus(
     } catch (e) {
       console.warn("Could not cache after photo in localStorage", e);
     }
+  } else if (afterImageUrl === null) {
+    try {
+      localStorage.removeItem(`infratrack_after_photo_${complaint.id}`);
+      localStorage.removeItem(`infratrack_resolution_photo_${complaint.id}`);
+      if (complaint.complaint_id) {
+        localStorage.removeItem(`infratrack_after_photo_${complaint.complaint_id}`);
+        localStorage.removeItem(`infratrack_resolution_photo_${complaint.complaint_id}`);
+      }
+    } catch {
+      // ignore
+    }
   }
 
   // 2. Sync to Supabase in background
@@ -355,13 +366,19 @@ export async function updateStatus(
       resolved_at: newStatus === "resolved" ? now : complaint.resolved_at,
     };
 
-    const { error } = await supabase
-      .from("complaints")
-      .update(dbUpdate)
-      .eq("id", complaint.id);
+    try {
+      const payloadWithPhoto = afterImageUrl ? { ...dbUpdate, after_image_url: afterImageUrl } : dbUpdate;
+      const { error } = await supabase
+        .from("complaints")
+        .update(payloadWithPhoto as any)
+        .eq("id", complaint.id);
 
-    if (error) {
-      console.warn("Supabase updateStatus error:", error);
+      if (error) {
+        const { error: retryErr } = await supabase.from("complaints").update(dbUpdate).eq("id", complaint.id);
+        if (retryErr) console.warn("Supabase updateStatus error:", retryErr);
+      }
+    } catch {
+      await supabase.from("complaints").update(dbUpdate).eq("id", complaint.id);
     }
 
     await supabase.from("status_history").insert({

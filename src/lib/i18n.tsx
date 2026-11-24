@@ -250,6 +250,14 @@ export const translations: Translations = {
     en: "Resolution Proof Photo",
     hi: "समाधान की फोटो अपलोड करें",
   },
+  attach_resolution_photo: {
+    en: "Attach Resolution Proof Photo (After)",
+    hi: "समाधान की फोटो अपलोड करें",
+  },
+  attach_resolution_photo_hint: {
+    en: "Upload photographic evidence verifying work or repair completion on-site.",
+    hi: "मौके पर कार्य अथवा मरम्मत पूर्ण होने का फोटो प्रमाण अपलोड करें।",
+  },
   resolution_photo_hint: {
     en: "Attach a photo verifying repair or resolution completion.",
     hi: "मरम्मत या समाधान पूर्ण होने का सत्यापन फोटो संलग्न करें।",

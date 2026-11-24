@@ -669,10 +669,13 @@ function UpdateDialog({
   const qc = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const existingAfterPhoto = resolveAfterPhotoUrl(complaint);
+
   const [status, setStatus] = useState<Status>(complaint.status as Status);
   const [remarks, setRemarks] = useState("");
   const [proofFile, setProofFile] = useState<File | null>(null);
-  const [proofPreview, setProofPreview] = useState<string | null>(null);
+  const [proofPreview, setProofPreview] = useState<string | null>(existingAfterPhoto);
+  const [photoRemoved, setPhotoRemoved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [beforeImgError, setBeforeImgError] = useState(false);
 
@@ -691,18 +694,39 @@ function UpdateDialog({
       const { dataUrl } = await compressImage(file, 900, 900, 0.72);
       setProofPreview(dataUrl);
       setProofFile(file);
+      setPhotoRemoved(false);
+
+      // Automatically pre-select Resolved if the Admin uploads an After photo while the status is still Pending
+      if (status === "pending") {
+        setStatus("resolved");
+        toast.info(
+          t("lang") === "hi"
+            ? "स्थिति स्वतः 'समाधान हुआ' (Resolved) पर सेट की गई।"
+            : "Status automatically updated to Resolved.",
+        );
+      }
+
       toast.success("Resolution proof photo prepared.");
     } catch {
       toast.error("Could not compress photo.");
     }
   };
 
+  const handleRemoveProof = () => {
+    setProofFile(null);
+    setProofPreview(null);
+    setPhotoRemoved(true);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     try {
-      let afterImageUrl: string | null = null;
-      if (status === "resolved" && proofFile) {
+      let afterImageUrl: string | null = proofPreview;
+
+      // If a new file was chosen, compress and upload
+      if (proofFile) {
         try {
           const comp = await compressImage(proofFile, 900, 900, 0.72);
           afterImageUrl = comp.dataUrl;
@@ -712,6 +736,18 @@ function UpdateDialog({
         } catch (err) {
           console.warn("Could not save proof photo to storage, stored locally", err);
         }
+      } else if (photoRemoved) {
+        afterImageUrl = null;
+        try {
+          localStorage.removeItem(`infratrack_after_photo_${complaint.id}`);
+          localStorage.removeItem(`infratrack_resolution_photo_${complaint.id}`);
+          if (complaint.complaint_id) {
+            localStorage.removeItem(`infratrack_after_photo_${complaint.complaint_id}`);
+            localStorage.removeItem(`infratrack_resolution_photo_${complaint.complaint_id}`);
+          }
+        } catch {
+          // ignore
+        }
       }
 
       await updateStatus(
@@ -719,7 +755,7 @@ function UpdateDialog({
         status,
         remarks,
         actorId,
-        afterImageUrl || proofPreview,
+        afterImageUrl,
         t("lang") as "en" | "hi",
       );
 
@@ -732,7 +768,7 @@ function UpdateDialog({
                 ...item,
                 status,
                 remarks: remarks || item.remarks,
-                after_image_url: afterImageUrl || proofPreview || item.after_image_url,
+                after_image_url: afterImageUrl,
                 resolved_at: status === "resolved" ? new Date().toISOString() : item.resolved_at,
               }
             : item,
@@ -833,76 +869,84 @@ function UpdateDialog({
           </select>
         </div>
 
-        {/* Authority "After" Resolution Proof Photo */}
-        {status === "resolved" ? (
-          <div className="space-y-2 rounded-xl border border-dashed border-primary/40 bg-primary/5 p-4 animate-in fade-in">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-bold text-foreground flex items-center gap-1.5">
-                <Camera className="h-4 w-4 text-primary" />
-                {t("resolution_photo_label")}
-              </label>
-              {proofPreview ? (
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => {
-                    setProofFile(null);
-                    setProofPreview(null);
-                  }}
-                  className="text-destructive h-6 text-[11px]"
-                >
-                  <Trash2 className="h-3 w-3 mr-1" /> Remove
-                </Button>
-              ) : null}
-            </div>
-            <p className="text-[11px] text-muted-foreground">{t("resolution_photo_hint")}</p>
-
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleProofChange}
-              accept="image/*"
-              className="hidden"
-              id="proof-photo-input"
-            />
-
+        {/* Always-Visible Resolution Proof Photo (After) Uploader */}
+        <div className="space-y-2 rounded-xl border border-dashed border-primary/40 bg-primary/5 p-4 transition-all">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-bold text-foreground flex items-center gap-1.5 cursor-pointer">
+              <Camera className="h-4 w-4 text-primary" />
+              <span>
+                {t("attach_resolution_photo") || (t("lang") === "hi"
+                  ? "समाधान की फोटो अपलोड करें"
+                  : "Attach Resolution Proof Photo (After)")}
+              </span>
+            </label>
             {proofPreview ? (
-              <div className="relative overflow-hidden rounded-xl border border-border shadow-xs mt-2">
-                <img
-                  src={proofPreview}
-                  alt="Resolution Proof Preview"
-                  className="max-h-40 w-full object-cover"
-                />
-                <span className="absolute bottom-2 left-2 rounded-md bg-black/70 px-2 py-0.5 text-[10px] font-bold text-white">
-                  {t("after_photo_label")}
-                </span>
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="secondary"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="absolute top-2 right-2 text-xs"
-                >
-                  Change
-                </Button>
-              </div>
-            ) : (
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                className="flex flex-col items-center justify-center p-3.5 border border-dashed border-border rounded-lg bg-card/80 hover:bg-card cursor-pointer transition-colors"
+              <Button
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={handleRemoveProof}
+                className="text-destructive hover:text-destructive hover:bg-destructive/10 h-6 text-[11px]"
               >
-                <ImagePlus className="h-6 w-6 text-primary mb-1" />
-                <p className="text-xs font-semibold text-foreground">
-                  Attach Resolution Proof Photo
-                </p>
-                <p className="text-[10px] text-muted-foreground">
-                  Enables Before & After comparison for citizens
-                </p>
-              </div>
-            )}
+                <Trash2 className="h-3 w-3 mr-1" /> {t("lang") === "hi" ? "हटाएं" : "Remove"}
+              </Button>
+            ) : null}
           </div>
-        ) : null}
+
+          <p className="text-[11px] text-muted-foreground">
+            {t("attach_resolution_photo_hint") || (t("lang") === "hi"
+              ? "मौके पर कार्य अथवा मरम्मत पूर्ण होने का फोटो प्रमाण अपलोड करें।"
+              : "Upload photographic evidence verifying work or repair completion on-site.")}
+          </p>
+
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleProofChange}
+            accept="image/*"
+            className="hidden"
+            id="proof-photo-input"
+          />
+
+          {proofPreview ? (
+            <div className="relative overflow-hidden rounded-xl border border-border shadow-xs mt-2 bg-background/50">
+              <img
+                src={proofPreview}
+                alt="Resolution Proof Preview"
+                className="max-h-44 w-full object-cover"
+              />
+              <span className="absolute bottom-2 left-2 rounded-md bg-black/75 backdrop-blur-xs px-2.5 py-1 text-[10px] font-bold text-white shadow-xs">
+                {t("after_photo_label") || "After (Resolved)"}
+              </span>
+              <Button
+                type="button"
+                size="xs"
+                variant="secondary"
+                onClick={() => fileInputRef.current?.click()}
+                className="absolute top-2 right-2 text-xs shadow-xs font-medium"
+              >
+                {t("lang") === "hi" ? "बदलें" : "Change Photo"}
+              </Button>
+            </div>
+          ) : (
+            <div
+              onClick={() => fileInputRef.current?.click()}
+              className="flex flex-col items-center justify-center p-4 border border-dashed border-border rounded-lg bg-card hover:bg-card/90 cursor-pointer transition-colors shadow-2xs group"
+            >
+              <ImagePlus className="h-6 w-6 text-primary group-hover:scale-110 transition-transform mb-1.5" />
+              <p className="text-xs font-semibold text-foreground">
+                {t("attach_resolution_photo") || (t("lang") === "hi"
+                  ? "समाधान की फोटो अपलोड करें"
+                  : "Attach Resolution Proof Photo (After)")}
+              </p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">
+                {t("lang") === "hi"
+                  ? "नागरिकों को 'पहले और बाद' का सत्यापन देखने में सक्षम बनाता है"
+                  : "Enables Before & After comparison for citizens"}
+              </p>
+            </div>
+          )}
+        </div>
 
         <div className="space-y-1.5">
           <label className="text-xs font-semibold text-foreground">Remarks for Citizen</label>
