@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Camera,
@@ -34,6 +34,7 @@ import { getUpvotesCount } from "@/lib/upvotes";
 import {
   saveComplaintPhoto,
   compressImage,
+  uploadComplaintImage,
   getComplaintBeforePhoto,
   resolveBeforePhotoUrl,
   resolveAfterPhotoUrl,
@@ -137,20 +138,50 @@ function ManageComplaints() {
     qc.invalidateQueries({ queryKey: ["complaints"] });
   }
 
-  async function assign(c: Complaint, field: "department_id" | "priority", value: string) {
-    const patch =
-      field === "department_id"
-        ? { department_id: value }
-        : { priority: value as "low" | "medium" | "high" };
-    updateLocalComplaint(c.id, patch);
-    try {
-      const { error } = await supabase.from("complaints").update(patch).eq("id", c.id);
-      if (error) console.warn("Supabase assign error:", error);
-    } catch (err) {
-      console.warn("Could not sync assign to Supabase:", err);
-    }
-    refresh();
-    toast.success("Complaint updated");
+  const assignMutation = useMutation({
+    mutationFn: async ({
+      c,
+      field,
+      value,
+    }: {
+      c: Complaint;
+      field: "department_id" | "priority";
+      value: string;
+    }) => {
+      const patch =
+        field === "department_id"
+          ? { department_id: value }
+          : { priority: value as "low" | "medium" | "high" };
+      updateLocalComplaint(c.id, patch);
+      try {
+        const { error } = await supabase.from("complaints").update(patch).eq("id", c.id);
+        if (error) console.warn("Supabase assign error:", error);
+      } catch (err) {
+        console.warn("Could not sync assign to Supabase:", err);
+      }
+      return { c, patch };
+    },
+    onMutate: async ({ c, field, value }) => {
+      await qc.cancelQueries({ queryKey: ["complaints"] });
+      const patch =
+        field === "department_id"
+          ? { department_id: value }
+          : { priority: value as "low" | "medium" | "high" };
+      updateLocalComplaint(c.id, patch);
+
+      qc.setQueriesData<Complaint[]>({ queryKey: ["complaints"] }, (old) => {
+        if (!old) return old;
+        return old.map((item) => (item.id === c.id ? { ...item, ...patch } : item));
+      });
+      toast.success("Complaint updated");
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["complaints"] });
+    },
+  });
+
+  function assign(c: Complaint, field: "department_id" | "priority", value: string) {
+    assignMutation.mutate({ c, field, value });
   }
 
   return (
@@ -635,6 +666,7 @@ function UpdateDialog({
   onInspectImage?: (url: string, title: string, badge: string) => void;
 }) {
   const { t } = useLanguage();
+  const qc = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [status, setStatus] = useState<Status>(complaint.status as Status);
@@ -656,7 +688,7 @@ function UpdateDialog({
     }
 
     try {
-      const { dataUrl } = await compressImage(file);
+      const { dataUrl } = await compressImage(file, 900, 900, 0.72);
       setProofPreview(dataUrl);
       setProofFile(file);
       toast.success("Resolution proof photo prepared.");
@@ -669,16 +701,44 @@ function UpdateDialog({
     e.preventDefault();
     setSaving(true);
     try {
-      // If marking resolved and authority attached proof photo
+      let afterImageUrl: string | null = null;
       if (status === "resolved" && proofFile) {
         try {
+          const comp = await compressImage(proofFile, 900, 900, 0.72);
+          afterImageUrl = comp.dataUrl;
+          const storageUrl = await uploadComplaintImage(comp.blob, "resolved");
+          if (storageUrl) afterImageUrl = storageUrl;
           await saveComplaintPhoto(proofFile, complaint.id, "after");
         } catch (err) {
           console.warn("Could not save proof photo to storage, stored locally", err);
         }
       }
 
-      await updateStatus(complaint, status, remarks, actorId);
+      await updateStatus(
+        complaint,
+        status,
+        remarks,
+        actorId,
+        afterImageUrl || proofPreview,
+        t("lang") as "en" | "hi",
+      );
+
+      // Optimistically update query caches
+      qc.setQueriesData<Complaint[]>({ queryKey: ["complaints"] }, (old) => {
+        if (!old) return old;
+        return old.map((item) =>
+          item.id === complaint.id
+            ? {
+                ...item,
+                status,
+                remarks: remarks || item.remarks,
+                after_image_url: afterImageUrl || proofPreview || item.after_image_url,
+                resolved_at: status === "resolved" ? new Date().toISOString() : item.resolved_at,
+              }
+            : item,
+        );
+      });
+
       toast.success(`${complaint.complaint_id} updated successfully`);
       onDone();
     } catch (err) {

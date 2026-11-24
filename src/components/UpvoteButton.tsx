@@ -1,4 +1,5 @@
 import React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ThumbsUp, Check, Flame } from "lucide-react";
 import { useUpvotes } from "@/lib/upvotes";
 import { useLanguage } from "@/lib/i18n";
@@ -23,6 +24,7 @@ export function UpvoteButton({
 }: UpvoteButtonProps) {
   const { user } = useAuth();
   const { t } = useLanguage();
+  const qc = useQueryClient();
   const { count, hasVoted, toggle, isCommunityVerified } = useUpvotes(
     complaintId,
     complaintCode,
@@ -33,6 +35,7 @@ export function UpvoteButton({
     e.preventDefault();
     e.stopPropagation();
     const res = toggle();
+    qc.invalidateQueries({ queryKey: ["complaints"] });
     if (res.upvoted) {
       toast.success(
         res.count >= 5

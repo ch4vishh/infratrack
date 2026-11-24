@@ -17,6 +17,7 @@ import {
 import { useAuth } from "@/hooks/useAuth";
 import { useLanguage, LanguageToggle } from "@/lib/i18n";
 import { supabase } from "@/integrations/supabase/client";
+import { getLocalNotifications } from "@/lib/complaints";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
@@ -42,11 +43,33 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
 
   useEffect(() => {
     if (!user) return;
-    supabase
-      .from("notifications")
-      .select("id", { count: "exact", head: true })
-      .eq("is_read", false)
-      .then(({ count }) => setUnread(count ?? 0));
+
+    const computeUnread = async () => {
+      let remoteCount = 0;
+      try {
+        const { count } = await supabase
+          .from("notifications")
+          .select("id", { count: "exact", head: true })
+          .eq("is_read", false);
+        remoteCount = count ?? 0;
+      } catch {
+        // network/offline fallback
+      }
+
+      const localUnread = getLocalNotifications(user.id).filter((n) => !n.is_read).length;
+      setUnread(Math.max(remoteCount, localUnread));
+    };
+
+    computeUnread();
+
+    const handleNotifEvent = () => {
+      computeUnread();
+    };
+
+    window.addEventListener("infratrack-notification-event", handleNotifEvent);
+    return () => {
+      window.removeEventListener("infratrack-notification-event", handleNotifEvent);
+    };
   }, [user, pathname]);
 
   const citizenNav: NavItem[] = [
