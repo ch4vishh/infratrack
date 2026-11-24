@@ -39,6 +39,7 @@ import {
   getComplaintBeforePhoto,
   resolveBeforePhotoUrl,
   resolveAfterPhotoUrl,
+  isValidImageUrlOrDataUrl,
 } from "@/lib/imageCompression";
 import {
   CATEGORIES,
@@ -692,7 +693,7 @@ function UpdateDialog({
     }
 
     try {
-      const { dataUrl } = await compressImage(file, 900, 900, 0.72);
+      const { dataUrl } = await compressImage(file, 800, 800, 0.7);
       setProofPreview(dataUrl);
       setProofFile(file);
       setPhotoRemoved(false);
@@ -724,15 +725,23 @@ function UpdateDialog({
     e.preventDefault();
     setSaving(true);
     try {
-      let afterImageUrl: string | null = proofPreview;
+      let afterImageUrl: string | null =
+        proofPreview && isValidImageUrlOrDataUrl(proofPreview) ? proofPreview : null;
 
       // If a new file was chosen, compress and upload
       if (proofFile) {
         try {
-          const comp = await compressImage(proofFile, 900, 900, 0.72);
-          afterImageUrl = comp.dataUrl;
-          const storageUrl = await uploadComplaintImage(comp.blob, "resolved");
-          if (storageUrl) afterImageUrl = storageUrl;
+          const comp = await compressImage(proofFile, 800, 800, 0.7);
+          let candidateUrl = comp.dataUrl;
+          try {
+            const storageUrl = await uploadComplaintImage(comp.blob, "resolved");
+            if (storageUrl && isValidImageUrlOrDataUrl(storageUrl)) {
+              candidateUrl = storageUrl;
+            }
+          } catch (stErr) {
+            console.warn("Storage upload warning:", stErr);
+          }
+          afterImageUrl = candidateUrl;
           await saveComplaintPhoto(proofFile, complaint.id, "after");
         } catch (err) {
           console.warn("Could not save proof photo to storage, stored locally", err);

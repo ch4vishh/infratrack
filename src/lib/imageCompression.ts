@@ -2,15 +2,15 @@ import { supabase } from "@/integrations/supabase/client";
 
 /**
  * Fast Client-Side Image Compression using HTML5 <canvas>.
- * Resizes down to max 900px width/height maintaining aspect ratio and encodes
- * at 0.72 JPEG/WebP quality, consistently keeping file sizes under ~150 KB
- * so uploads complete in under a second even on slow mobile/4G connections.
+ * Resizes down to max 800px width/height maintaining aspect ratio and encodes
+ * at 0.70 JPEG quality, consistently keeping file sizes under ~100 KB
+ * so uploads complete in under a second and fit reliably in DB columns and cross-device sync.
  */
 export async function compressImage(
   file: File | Blob,
-  maxWidth = 900,
-  maxHeight = 900,
-  quality = 0.72,
+  maxWidth = 800,
+  maxHeight = 800,
+  quality = 0.7,
 ): Promise<{ dataUrl: string; blob: Blob }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -122,7 +122,7 @@ export async function saveComplaintPhoto(
   complaintId: string,
   type: "before" | "after",
 ): Promise<string> {
-  const { dataUrl } = await compressImage(file, 900, 900, 0.72);
+  const { dataUrl } = await compressImage(file, 800, 800, 0.7);
 
   // Always save to localStorage immediately for instant offline/zero-config fallback
   if (typeof window !== "undefined") {
@@ -178,6 +178,11 @@ export function getBeforePhotoUrl(
     if (typeof candidate === "string" && candidate.trim()) {
       const trimmed = candidate.trim();
 
+      // Reject ephemeral blob: URLs (they cannot be loaded across devices or sessions)
+      if (trimmed.startsWith("blob:")) {
+        continue;
+      }
+
       // Check if it's a valid Data URL
       if (trimmed.startsWith("data:image/")) {
         if (isValidDataUrl(trimmed)) {
@@ -186,11 +191,10 @@ export function getBeforePhotoUrl(
         continue;
       }
 
-      // Check if it's a web URL (http, https, blob, absolute path)
+      // Check if it's a persistent web URL (http, https, absolute path)
       if (
         trimmed.startsWith("http://") ||
         trimmed.startsWith("https://") ||
-        trimmed.startsWith("blob:") ||
         trimmed.startsWith("/")
       ) {
         return trimmed;
@@ -266,6 +270,10 @@ export function getAfterPhotoUrl(
   for (const candidate of candidateFields) {
     if (typeof candidate === "string" && candidate.trim()) {
       const trimmed = candidate.trim();
+      // Reject ephemeral blob: URLs
+      if (trimmed.startsWith("blob:")) {
+        continue;
+      }
       if (trimmed.startsWith("data:image/")) {
         if (isValidDataUrl(trimmed)) return trimmed;
         continue;
@@ -273,7 +281,6 @@ export function getAfterPhotoUrl(
       if (
         trimmed.startsWith("http://") ||
         trimmed.startsWith("https://") ||
-        trimmed.startsWith("blob:") ||
         trimmed.startsWith("/")
       ) {
         return trimmed;
@@ -326,12 +333,12 @@ function resolveFromLocalStorage(keyId: string, type: "before" | "after"): strin
       const val = localStorage.getItem(k);
       if (val && typeof val === "string") {
         const trimmed = val.trim();
+        if (trimmed.startsWith("blob:")) continue;
         if (trimmed.startsWith("data:image/")) {
           if (isValidDataUrl(trimmed)) return trimmed;
         } else if (
           trimmed.startsWith("http://") ||
           trimmed.startsWith("https://") ||
-          trimmed.startsWith("blob:") ||
           trimmed.startsWith("/")
         ) {
           return trimmed;
@@ -360,12 +367,12 @@ function resolveFromLocalStorage(keyId: string, type: "before" | "after"): strin
                 : found.after_image_url || found.after_photo_url || found.resolution_image_url || found.after_image;
             if (candidate && typeof candidate === "string") {
               const trimmed = candidate.trim();
+              if (trimmed.startsWith("blob:")) continue;
               if (trimmed.startsWith("data:image/")) {
                 if (isValidDataUrl(trimmed)) return trimmed;
               } else if (
                 trimmed.startsWith("http://") ||
                 trimmed.startsWith("https://") ||
-                trimmed.startsWith("blob:") ||
                 trimmed.startsWith("/")
               ) {
                 return trimmed;
@@ -394,17 +401,19 @@ function isValidDataUrl(str: string): boolean {
 }
 
 /**
- * Checks if a string is a valid web or data URL.
+ * Checks if a string is a valid web or data URL (never ephemeral blob).
  */
-function isValidImageUrlOrDataUrl(str: string): boolean {
-  if (str.startsWith("data:image/")) {
-    return isValidDataUrl(str);
+export function isValidImageUrlOrDataUrl(str: string): boolean {
+  if (!str || typeof str !== "string") return false;
+  const trimmed = str.trim();
+  if (trimmed.startsWith("blob:")) return false;
+  if (trimmed.startsWith("data:image/")) {
+    return isValidDataUrl(trimmed);
   }
   return (
-    str.startsWith("http://") ||
-    str.startsWith("https://") ||
-    str.startsWith("blob:") ||
-    str.startsWith("/")
+    trimmed.startsWith("http://") ||
+    trimmed.startsWith("https://") ||
+    trimmed.startsWith("/")
   );
 }
 

@@ -20,6 +20,7 @@ import {
   compressImage,
   uploadComplaintImage,
   getComplaintBeforePhoto,
+  isValidImageUrlOrDataUrl,
 } from "@/lib/imageCompression";
 import {
   CATEGORIES,
@@ -110,7 +111,13 @@ function ReportForm() {
       return;
     }
     navigator.geolocation.getCurrentPosition(
-      (pos) => setPicked({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      (pos) => {
+        const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setPicked(coords);
+        if (!address.trim()) {
+          setAddress(`${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`);
+        }
+      },
       () => toast.error("Could not read your location. Tap the map instead."),
     );
   }
@@ -126,7 +133,7 @@ function ReportForm() {
 
     setCompressing(true);
     try {
-      const { dataUrl } = await compressImage(file, 900, 900, 0.72);
+      const { dataUrl } = await compressImage(file, 800, 800, 0.7);
       setPhotoPreview(dataUrl);
       setSelectedFile(file);
       toast.success("Image attached and optimized.");
@@ -157,15 +164,30 @@ function ReportForm() {
 
       if (file) {
         try {
-          const comp = await compressImage(file, 900, 900, 0.72);
+          const comp = await compressImage(file, 800, 800, 0.7);
           compressedDataUrl = comp.dataUrl;
-          storagePublicUrl = await uploadComplaintImage(comp.blob, "issue");
-        } catch (uploadErr) {
-          console.warn("Storage upload warning:", uploadErr);
+          try {
+            storagePublicUrl = await uploadComplaintImage(comp.blob, "issue");
+          } catch (uploadErr) {
+            console.warn("[Storage] Storage upload warning:", uploadErr);
+          }
+        } catch (compErr) {
+          console.warn("[Compression] Image compression error:", compErr);
         }
       }
 
-      const finalResolvedUrl = storagePublicUrl || externalUrl || compressedDataUrl || null;
+      // Priority 1: Supabase Storage public URL
+      // Priority 2: Valid external HTTP/HTTPS URL
+      // Priority 3: Client-compressed Base64 Data URL (stored directly in DB for cross-device retrieval)
+      let finalResolvedUrl: string | null = null;
+      if (storagePublicUrl && isValidImageUrlOrDataUrl(storagePublicUrl)) {
+        finalResolvedUrl = storagePublicUrl;
+      } else if (externalUrl && isValidImageUrlOrDataUrl(externalUrl)) {
+        finalResolvedUrl = externalUrl;
+      } else if (compressedDataUrl && isValidImageUrlOrDataUrl(compressedDataUrl)) {
+        finalResolvedUrl = compressedDataUrl;
+      }
+
       if (finalResolvedUrl) {
         optimisticComplaint.image_url = finalResolvedUrl;
         saveLocalComplaint(optimisticComplaint);
@@ -187,20 +209,24 @@ function ReportForm() {
         }
       }
 
+      // Helper to ensure only standard UUIDs are sent to Postgres UUID columns
+      const isUuid = (val: string | null | undefined): boolean =>
+        !!val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+
       // Prepare insert payload for Supabase
       const insertPayload = {
-        user_id: optimisticComplaint.user_id,
+        user_id: isUuid(optimisticComplaint.user_id) ? optimisticComplaint.user_id : null,
         title: optimisticComplaint.title,
         description: optimisticComplaint.description,
-        category: optimisticComplaint.category,
-        priority: optimisticComplaint.priority,
+        category: optimisticComplaint.category as any,
+        priority: optimisticComplaint.priority as any,
         status: "pending" as const,
         address: optimisticComplaint.address,
         area: optimisticComplaint.area,
         image_url: finalResolvedUrl,
         latitude: optimisticComplaint.latitude,
         longitude: optimisticComplaint.longitude,
-        department_id: optimisticComplaint.department_id,
+        department_id: isUuid(optimisticComplaint.department_id) ? optimisticComplaint.department_id : null,
       };
 
       try {
@@ -248,7 +274,7 @@ function ReportForm() {
           saveLocalComplaint(real);
 
           // Non-blocking status history & notification
-          if (real.user_id) {
+          if (real.user_id && isUuid(real.user_id)) {
             supabase
               .from("status_history")
               .insert({
@@ -258,7 +284,8 @@ function ReportForm() {
                 changed_by: real.user_id,
                 remarks: "Complaint submitted with location and evidence",
               })
-              .then(() => { });
+              .then(() => { })
+              .catch(() => { });
 
             supabase
               .from("notifications")
@@ -267,13 +294,14 @@ function ReportForm() {
                 complaint_id: real.id,
                 message: `${real.complaint_id} received and sent to ${depName}.`,
               })
-              .then(() => { });
+              .then(() => { })
+              .catch(() => { });
           }
 
           return real;
         }
       } catch (networkErr) {
-        console.warn("Supabase insert network failure details:", networkErr);
+        console.warn("[Supabase] Insert network error (local store active):", networkErr);
       }
 
       return optimisticComplaint;
@@ -327,6 +355,9 @@ function ReportForm() {
         });
       }
       qc.invalidateQueries({ queryKey: ["complaints"] });
+    },
+    onError: (err) => {
+      console.warn("[Report] Mutation background sync warning (offline/local fallback active):", err);
     },
   });
 
@@ -393,14 +424,18 @@ function ReportForm() {
       }
     }
 
-    // 3. Trigger optimistic mutation in background
-    submitMutation.mutate({
-      optimisticComplaint,
-      file: selectedFile,
-      externalUrl: validExternalUrl,
-      rawPreview: photoPreview,
-      depName: departmentName,
-    });
+    // 3. Trigger optimistic mutation in background (never throws or prevents navigation)
+    try {
+      submitMutation.mutate({
+        optimisticComplaint,
+        file: selectedFile,
+        externalUrl: validExternalUrl,
+        rawPreview: photoPreview,
+        depName: departmentName,
+      });
+    } catch (mutErr) {
+      console.warn("submitMutation.mutate warning caught:", mutErr);
+    }
 
     // 4. Instant UI Feedback (0ms perceived latency)
     toast.success(
@@ -417,224 +452,229 @@ function ReportForm() {
     "h-10 w-full rounded-md border border-border/80 bg-background px-3 text-sm shadow-xs focus:outline-none focus:ring-2 focus:ring-ring";
 
   return (
-  <form onSubmit={onSubmit} className="grid gap-6 lg:grid-cols-2 max-w-[1400px] mx-auto">
-    <div className="space-y-4 rounded-2xl border border-border/80 bg-card p-6 shadow-card">
-      <div className="space-y-1.5">
-        <Label htmlFor="title" className="font-semibold text-xs">
-          {t("report_title_label")}
-        </Label>
-        <Input
-          id="title"
-          required
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder={t("report_title_placeholder")}
-        />
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="desc" className="font-semibold text-xs">
-          {t("report_desc_label")}
-        </Label>
-        <Textarea
-          id="desc"
-          required
-          rows={4}
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder={t("report_desc_placeholder")}
-        />
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
+    <form onSubmit={onSubmit} className="grid gap-6 lg:grid-cols-2 max-w-[1400px] mx-auto">
+      <div className="space-y-4 rounded-2xl border border-border/80 bg-card p-6 shadow-card">
         <div className="space-y-1.5">
-          <Label htmlFor="cat" className="font-semibold text-xs">
-            {t("report_category_label")}
+          <Label htmlFor="title" className="font-semibold text-xs">
+            {t("report_title_label")}
           </Label>
-          <select
-            id="cat"
-            className={selectClass}
-            value={category}
-            onChange={(e) => setCategory(e.target.value as Category)}
-          >
-            {CATEGORIES.map((c) => (
-              <option key={c.value} value={c.value}>
-                {t(`cat_${c.value}`, c.label)}
-              </option>
-            ))}
-          </select>
+          <Input
+            id="title"
+            required
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder={t("report_title_placeholder")}
+          />
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="prio" className="font-semibold text-xs">
-            {t("report_priority_label")}
+          <Label htmlFor="desc" className="font-semibold text-xs">
+            {t("report_desc_label")}
           </Label>
-          <select
-            id="prio"
-            className={selectClass}
-            value={priority}
-            onChange={(e) => {
-              setTouchedPriority(true);
-              setPriority(e.target.value as Priority);
-            }}
-          >
-            {PRIORITIES.map((p) => (
-              <option key={p.value} value={p.value}>
-                {t(`prio_${p.value}`, p.label)}
-              </option>
-            ))}
-          </select>
-          <p className="text-[11px] text-muted-foreground">
-            {t("report_suggested")}: {t(`prio_${suggested}`, suggested)}
-          </p>
+          <Textarea
+            id="desc"
+            required
+            rows={4}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder={t("report_desc_placeholder")}
+          />
         </div>
-      </div>
 
-      <div className="rounded-xl bg-primary/10 border border-primary/20 p-3 text-xs text-foreground">
-        {t("report_autodispatch")}:{" "}
-        <strong className="text-primary font-bold">{departmentName}</strong>
-      </div>
-
-      {/* Citizen "Before" Issue Photo Upload */}
-      <div className="space-y-2 rounded-xl border border-dashed border-border/90 bg-background/50 p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Camera className="h-4 w-4 text-primary" />
-            <Label className="font-semibold text-xs cursor-pointer">
-              {t("attach_photo_label")}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="cat" className="font-semibold text-xs">
+              {t("report_category_label")}
             </Label>
-          </div>
-          {photoPreview ? (
-            <Button
-              type="button"
-              size="xs"
-              variant="ghost"
-              onClick={removePhoto}
-              className="text-destructive hover:text-destructive hover:bg-destructive/10 text-xs h-7"
+            <select
+              id="cat"
+              className={selectClass}
+              value={category}
+              onChange={(e) => setCategory(e.target.value as Category)}
             >
-              <Trash2 className="h-3 w-3 mr-1" /> {t("remove_photo")}
-            </Button>
-          ) : null}
+              {CATEGORIES.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {t(`cat_${c.value}`, c.label)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="prio" className="font-semibold text-xs">
+              {t("report_priority_label")}
+            </Label>
+            <select
+              id="prio"
+              className={selectClass}
+              value={priority}
+              onChange={(e) => {
+                setTouchedPriority(true);
+                setPriority(e.target.value as Priority);
+              }}
+            >
+              {PRIORITIES.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {t(`prio_${p.value}`, p.label)}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-muted-foreground">
+              {t("report_suggested")}: {t(`prio_${suggested}`, suggested)}
+            </p>
+          </div>
         </div>
 
-        <p className="text-[11px] text-muted-foreground">{t("attach_photo_hint")}</p>
+        <div className="rounded-xl bg-primary/10 border border-primary/20 p-3 text-xs text-foreground">
+          {t("report_autodispatch")}:{" "}
+          <strong className="text-primary font-bold">{departmentName}</strong>
+        </div>
 
-        <input
-          type="file"
-          ref={fileInputRef}
-          onChange={handlePhotoChange}
-          accept="image/*"
-          className="hidden"
-          id="issue-photo-input"
-        />
-
-        {photoPreview ? (
-          <div className="relative overflow-hidden rounded-xl border border-border shadow-xs mt-2">
-            <img
-              src={photoPreview}
-              alt="Before repair preview"
-              className="max-h-48 w-full object-cover"
-            />
-            <div className="absolute bottom-2 left-2 rounded-md bg-black/70 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-xs">
-              {t("before_photo_label")}
+        {/* Citizen "Before" Issue Photo Upload */}
+        <div className="space-y-2 rounded-xl border border-dashed border-border/90 bg-background/50 p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Camera className="h-4 w-4 text-primary" />
+              <Label className="font-semibold text-xs cursor-pointer">
+                {t("attach_photo_label")}
+              </Label>
             </div>
-            <Button
-              type="button"
-              size="xs"
-              variant="secondary"
+            {photoPreview ? (
+              <Button
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={removePhoto}
+                className="text-destructive hover:text-destructive hover:bg-destructive/10 text-xs h-7"
+              >
+                <Trash2 className="h-3 w-3 mr-1" /> {t("remove_photo")}
+              </Button>
+            ) : null}
+          </div>
+
+          <p className="text-[11px] text-muted-foreground">{t("attach_photo_hint")}</p>
+
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handlePhotoChange}
+            accept="image/*"
+            className="hidden"
+            id="issue-photo-input"
+          />
+
+          {photoPreview ? (
+            <div className="relative overflow-hidden rounded-xl border border-border shadow-xs mt-2">
+              <img
+                src={photoPreview}
+                alt="Before repair preview"
+                className="max-h-48 w-full object-cover"
+              />
+              <div className="absolute bottom-2 left-2 rounded-md bg-black/70 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-xs">
+                {t("before_photo_label")}
+              </div>
+              <Button
+                type="button"
+                size="xs"
+                variant="secondary"
+                onClick={() => fileInputRef.current?.click()}
+                className="absolute top-2 right-2 shadow-xs text-xs"
+              >
+                {t("report_change_photo")}
+              </Button>
+            </div>
+          ) : (
+            <div
               onClick={() => fileInputRef.current?.click()}
-              className="absolute top-2 right-2 shadow-xs text-xs"
+              className="flex flex-col items-center justify-center p-4 border border-dashed border-border rounded-lg bg-card/60 hover:bg-card cursor-pointer transition-colors"
             >
-              {t("report_change_photo")}
-            </Button>
-          </div>
-        ) : (
-          <div
-            onClick={() => fileInputRef.current?.click()}
-            className="flex flex-col items-center justify-center p-4 border border-dashed border-border rounded-lg bg-card/60 hover:bg-card cursor-pointer transition-colors"
-          >
-            <ImagePlus className="h-7 w-7 text-primary/70 mb-1" />
-            <p className="text-xs font-semibold text-foreground">
-              {t("report_upload_click")}
-            </p>
-            <p className="text-[10px] text-muted-foreground">
-              {t("report_upload_types")}
-            </p>
-          </div>
-        )}
-      </div>
+              <ImagePlus className="h-7 w-7 text-primary/70 mb-1" />
+              <p className="text-xs font-semibold text-foreground">
+                {t("report_upload_click")}
+              </p>
+              <p className="text-[10px] text-muted-foreground">
+                {t("report_upload_types")}
+              </p>
+            </div>
+          )}
+        </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="addr" className="font-semibold text-xs">
-          {t("report_address_label")}
-        </Label>
-        <Input
-          id="addr"
-          required
-          value={address}
-          onChange={(e) => setAddress(e.target.value)}
-          placeholder={t("report_address_placeholder")}
-        />
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <Label htmlFor="area" className="font-semibold text-xs">
-            {t("report_area_label")}
+          <Label htmlFor="addr" className="font-semibold text-xs">
+            {t("report_address_label")}
           </Label>
           <Input
-            id="area"
-            value={area}
-            onChange={(e) => setArea(e.target.value)}
-            placeholder={t("report_area_placeholder")}
+            id="addr"
+            required={!picked}
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            placeholder={t("report_address_placeholder")}
           />
         </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="img" className="font-semibold text-xs">
-            {t("report_photo_url_label")}
-          </Label>
-          <Input
-            id="img"
-            value={imageUrl}
-            onChange={(e) => setImageUrl(e.target.value)}
-            placeholder="https://…"
-          />
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="area" className="font-semibold text-xs">
+              {t("report_area_label")}
+            </Label>
+            <Input
+              id="area"
+              value={area}
+              onChange={(e) => setArea(e.target.value)}
+              placeholder={t("report_area_placeholder")}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="img" className="font-semibold text-xs">
+              {t("report_photo_url_label")}
+            </Label>
+            <Input
+              id="img"
+              value={imageUrl}
+              onChange={(e) => setImageUrl(e.target.value)}
+              placeholder="https://…"
+            />
+          </div>
         </div>
-      </div>
 
-      <Button
-        type="submit"
-        className="w-full font-semibold shadow-xs"
-        disabled={submitMutation.isPending || compressing}
-      >
-        {submitMutation.isPending ? t("report_submitting_btn") : t("report_submit_btn")}
-      </Button>
-    </div>
-
-    <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <p className="text-xs text-muted-foreground font-medium">
-          {t("report_map_hint")}
-          {picked ? ` (${picked.lat.toFixed(4)}, ${picked.lng.toFixed(4)})` : ""}
-        </p>
         <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          className="ml-auto shadow-2xs font-medium"
-          onClick={useMyLocation}
+          type="submit"
+          className="w-full font-semibold shadow-xs"
+          disabled={submitMutation.isPending || compressing}
         >
-          <Crosshair className="mr-1.5 h-4 w-4 text-primary" /> {t("report_use_location")}
+          {submitMutation.isPending ? t("report_submitting_btn") : t("report_submit_btn")}
         </Button>
       </div>
-      <MapPanel
-        height="540px"
-        center={picked ? [picked.lat, picked.lng] : [20.5937, 78.9629]}
-        zoom={picked ? 14 : 5}
-        picked={picked}
-        onPick={(lat, lng) => setPicked({ lat, lng })}
-      />
-    </div>
-  </form>
-);
+
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <p className="text-xs text-muted-foreground font-medium">
+            {t("report_map_hint")}
+            {picked ? ` (${picked.lat.toFixed(4)}, ${picked.lng.toFixed(4)})` : ""}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="ml-auto shadow-2xs font-medium"
+            onClick={useMyLocation}
+          >
+            <Crosshair className="mr-1.5 h-4 w-4 text-primary" /> {t("report_use_location")}
+          </Button>
+        </div>
+        <MapPanel
+          height="540px"
+          center={picked ? [picked.lat, picked.lng] : [20.5937, 78.9629]}
+          zoom={picked ? 14 : 5}
+          picked={picked}
+          onPick={(lat, lng) => {
+            setPicked({ lat, lng });
+            if (!address.trim()) {
+              setAddress(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+            }
+          }}
+        />
+      </div>
+    </form>
+  );
 }

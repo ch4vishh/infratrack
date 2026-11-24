@@ -344,7 +344,7 @@ export function getLocalStatusHistory(complaintId: string): HistoryRow[] {
     if (raw) {
       return JSON.parse(raw) as HistoryRow[];
     }
-  } catch {}
+  } catch { }
   return [];
 }
 
@@ -365,7 +365,7 @@ export function saveLocalStatusHistory(complaintId: string, entry: HistoryRow): 
     window.dispatchEvent(
       new CustomEvent("infratrack-history-updated", { detail: { complaintId, entry } }),
     );
-  } catch {}
+  } catch { }
 }
 
 /**
@@ -492,43 +492,58 @@ export async function updateStatus(
 
   // 4. Sync to Supabase in background
   try {
+    const isUuid = (val: string | null | undefined): boolean =>
+      !!val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+
     const dbUpdate: Record<string, unknown> = {
       status: effectiveNewStatus,
       remarks: remarks || complaint.remarks,
       resolved_at: effectiveNewStatus === "resolved" ? complaint.resolved_at || now : null,
     };
 
+    const hasValidUuid = isUuid(complaint.id);
+
     try {
       const payloadWithPhoto = afterImageUrl
         ? { ...dbUpdate, after_image_url: afterImageUrl }
         : dbUpdate;
-      const { error } = await supabase
-        .from("complaints")
-        .update(payloadWithPhoto as any)
-        .eq("id", complaint.id);
 
-      if (error) {
-        const { error: retryErr } = await supabase
+      if (hasValidUuid) {
+        const { error } = await supabase
           .from("complaints")
-          .update(dbUpdate)
+          .update(payloadWithPhoto as any)
           .eq("id", complaint.id);
-        if (retryErr) console.warn("Supabase updateStatus error:", retryErr);
+
+        if (error) {
+          const { error: retryErr } = await supabase
+            .from("complaints")
+            .update(dbUpdate)
+            .eq("id", complaint.id);
+          if (retryErr) console.warn("Supabase updateStatus error:", retryErr);
+        }
+      } else if (complaint.complaint_id) {
+        await supabase
+          .from("complaints")
+          .update(payloadWithPhoto as any)
+          .eq("complaint_id", complaint.complaint_id);
       }
-    } catch {
-      await supabase.from("complaints").update(dbUpdate).eq("id", complaint.id);
+    } catch (dbErr) {
+      console.warn("Supabase updateStatus query warning:", dbErr);
     }
 
-    await supabase.from("status_history").insert({
-      complaint_id: complaint.id,
-      old_status: complaint.status as Status,
-      new_status: effectiveNewStatus,
-      changed_by: actorId,
-      remarks:
-        remarks ||
-        (effectiveNewStatus === "resolved"
-          ? "Issue resolved with photographic proof"
-          : null),
-    });
+    if (hasValidUuid && actorId && isUuid(actorId)) {
+      await supabase.from("status_history").insert({
+        complaint_id: complaint.id,
+        old_status: complaint.status as Status,
+        new_status: effectiveNewStatus,
+        changed_by: actorId,
+        remarks:
+          remarks ||
+          (effectiveNewStatus === "resolved"
+            ? "Issue resolved with photographic proof"
+            : null),
+      });
+    }
   } catch (err) {
     console.warn("Could not sync status update to Supabase (offline/network issue):", err);
   }
@@ -570,4 +585,5 @@ export {
   resolveBeforePhotoUrl,
   resolveAfterPhotoUrl,
   getComplaintPhoto,
+  isValidImageUrlOrDataUrl,
 } from "@/lib/imageCompression";
